@@ -14,24 +14,17 @@ let () =
   Printf.printf "native window handle = %nx\n%!" (Webview.get_window w);
   ignore (Webview.get_native_handle w Webview.Browser_controller);
 
-  (* Expose window.add(a, b) to JS. [req] is a JSON array of the arguments. *)
-  Webview.bind w "add" (fun id req ->
-      Printf.printf "binding called <add>: id=%s req=%s\n%!" id req;
-      let result =
-        match Scanf.sscanf_opt req "[%d,%d]" (fun a b -> a + b) with
-        | Some n -> string_of_int n
-        | None -> "null"
+  (* Expose window.home_dir() to JS. The page opens on the user's home
+     directory, and JavaScript has no way to know where that is. *)
+  Webview.bind w "home_dir" (fun id req ->
+      Printf.printf "binding called <home_dir>: id=%s req=%s\n%!" id req;
+      let home =
+        match Sys.getenv_opt "HOME" with
+        | Some home -> home
+        (* Windows spells it differently; "." at least lists something. *)
+        | None -> Option.value (Sys.getenv_opt "USERPROFILE") ~default:"."
       in
-      Webview.return w id ~error:false ~result);
-
-  (* Expose window.os_type() to JS. Returns the host OS as a JSON string. *)
-  Webview.bind w "os_type" (fun id req ->
-      Printf.printf "binding called <os_type>: id=%s req=%s\n%!" id req;
-      let result =
-        Printf.sprintf "show(%s)" (Utils.js_quote (Utils.detect_os ()))
-      in
-      Webview.eval w result;
-      Webview.return w id ~error:false ~result:"");
+      Webview.return w id ~error:false ~result:(Utils.js_quote home));
 
   (* Expose window.read_file(path) to JS. It resolves with the contents of the
      file as a string, or rejects with an error message.
@@ -54,6 +47,58 @@ let () =
           match In_channel.with_open_bin path In_channel.input_all with
           | contents ->
               Webview.return w id ~error:false ~result:(Utils.js_quote contents)
+          | exception Sys_error msg ->
+              Webview.return w id ~error:true ~result:(Utils.js_quote msg)));
+
+  (* Expose window.read_dir(path) to JS. It resolves with the direct contents
+     of the directory, as a JSON array of {"name": ..., "kind": ...} where kind
+     is "file", "directory" or "other".
+
+     One level only: to walk down, the page calls read_dir again on the child.
+     That keeps a single call bounded, which matters here because — like
+     read_file above — it runs on the UI thread. *)
+  Webview.bind w "read_dir" (fun id req ->
+      Printf.printf "binding called <read_dir>: id=%s req=%s\n%!" id req;
+      match Utils.json_string_arg req with
+      | None ->
+          Webview.return w id ~error:true
+            ~result:
+              (Utils.js_quote "read_dir expects a directory path as a string")
+      | Some path -> (
+          match Sys.readdir path with
+          | entries ->
+              (* [readdir] order is whatever the filesystem hands back, so the
+                 listing is sorted here to stay stable between calls. Hidden
+                 entries are kept: filtering them is the page's business. *)
+              Array.sort String.compare entries;
+              let kind name =
+                (* [stat] follows symlinks, so a link to a folder is reported
+                   as a directory and stays navigable. An entry that cannot be
+                   stat'ed at all — a broken link, a directory we may list but
+                   not enter — is reported as "other" instead of failing the
+                   whole listing. *)
+                match (Unix.stat (Filename.concat path name)).Unix.st_kind with
+                | Unix.S_REG -> "file"
+                | Unix.S_DIR -> "directory"
+                | _ -> "other"
+                | exception Unix.Unix_error _ -> "other"
+              in
+              let item name =
+                (* The full path travels with the entry: joining it back in
+                   the page would mean hardcoding a separator, and
+                   [Filename.concat] already knows the right one. *)
+                Printf.sprintf "{\"name\":%s,\"path\":%s,\"kind\":%s}"
+                  (Utils.js_quote name)
+                  (Utils.js_quote (Filename.concat path name))
+                  (Utils.js_quote (kind name))
+              in
+              let result =
+                "["
+                ^ String.concat ","
+                    (Array.to_list (Array.map item entries))
+                ^ "]"
+              in
+              Webview.return w id ~error:false ~result
           | exception Sys_error msg ->
               Webview.return w id ~error:true ~result:(Utils.js_quote msg)));
 
