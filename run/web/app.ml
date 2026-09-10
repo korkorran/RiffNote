@@ -49,16 +49,7 @@ type node =
 
 and entry = { name : string; path : string; node : node }
 
-(** The whole state of the UI. *)
-type model = {
-  root : string;  (** directory shown at the top of the tree *)
-  tree : entry list;  (** contents of [root] *)
-  path : string;  (** the file path currently typed in the input *)
-  output : string;  (** what the output pane displays *)
-  reading : bool;  (** a file is being read *)
-}
-
-type msg =
+type 'inner_content_editor_msg msg =
   | Home_known of string  (** [home_dir] answered; the tree can be rooted *)
   | Path_edited of string
   | Open_clicked  (** re-root the tree on the typed path *)
@@ -69,6 +60,24 @@ type msg =
   | File_read of string
   | Pushed of string  (** the native side called [show] *)
   | Failed of string
+  | Content_Editor_Msg of 'inner_content_editor_msg
+  | Save_File of string * string  (** Save the content to a file *)
+
+(** define widget *)
+module ContentEditorWidget = ContentEditor.Make (struct
+  type 'inner_msg msg = 'inner_msg msg
+  let push_up_msg = ContentEditor.push_up_msg
+  let save_file path content = Save_File (path, content)
+end)
+
+(** The whole state of the UI. *)
+type model = {
+  root : string;  (** directory shown at the top of the tree *)
+  tree : entry list;  (** contents of [root] *)
+  path : string;  (** the file path currently typed in the input *)
+  output : ContentEditorWidget.model;  (** what the output pane displays *)
+  reading : bool;  (** a file is being read *)
+}
 
 (* Calling a binding is asynchronous, so it is expressed as a command instead
    of being run from [update]: that keeps [update] a pure function of the model
@@ -136,7 +145,7 @@ let init =
             (fun home -> Home_known (to_string home)),
             fun e -> Failed e );
       ]
-    { root = ""; tree = []; path = ""; output = ""; reading = false }
+    { root = ""; tree = []; path = ""; output = ContentEditorWidget.init; reading = false }
 
 let update model = function
   | Home_known home ->
@@ -187,7 +196,9 @@ let update model = function
           ]
         { model with reading = true }
   | File_read contents ->
-      Vdom.return { model with output = contents; reading = false }
+      Vdom.return { model with output = ContentEditorWidget.update model.output (ContentEditorWidget.UpdateContent contents); reading = false }
+  | Save_File (path, content) ->
+      Vdom.return { model with output = ContentEditorWidget.update model.output (ContentEditorWidget.UpdateContent content) }
   | Pushed text -> Vdom.return { model with output = text }
   | Failed e ->
       Vdom.return { model with output = "error: " ^ e; reading = false }
