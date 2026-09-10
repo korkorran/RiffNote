@@ -1,72 +1,78 @@
+(* The content pane, as a self-contained vdom component: its own model, its own
+   messages, its own update, and no knowledge of the application around it.
+   app.ml embeds it with [Vdom.map] and [Vdom.Cmd.map], which is how ocaml-vdom
+   nests a child into a parent — the child speaks its own message type and the
+   parent wraps it on the way up. *)
+
 open Vdom
 
-module type Provision = sig
-  type 'inner_msg msg (* The type of messages that can be sent to the upper layer of the application. *)
-  val push_up_msg : 'inner_msg -> 'inner_msg msg (* Function to push a message up to the upper layer of the application. *)
+type msg =
+  | UpdateContent of string
+  | ToggleMode of bool
+  | SaveFile of string
 
-  (* Extra callback for the content editor widget. 
-    The function to save the content to a file. It takes the file path and the content as arguments. *)
-  val save_file : string -> string -> _ msg
-end
+type model = {
+  content : string;  (** what the pane shows, and what [SaveFile] would write *)
+  editable_markdown : bool;  (** render the content as markdown once editable *)
+  editable_mode : bool;  (** the pane is an editor rather than a viewer *)
+  file_path : string;  (** the file the content came from; "" when none *)
+}
 
-
-module type Widget = sig
-  type 'inner_msg msg
-  type model
-  type inner_msg
-  val init : model
-  val update : model -> inner_msg -> model * (inner_msg msg Cmd.t list)
-  val view : model -> inner_msg msg vdom
-end
-
-
-module Make(Provision: Provision) : Widget with type 'inner_msg msg := 'inner_msg Provision.msg = struct
-
-(* Definition of the vdom widget 'ContentEditor' *)
-  type model = {
-    content : string;
-    editableMarkdown : bool;
-    editableMode : bool;
-    filePath : string;
-  } (* the type of the application state *)
-  
-  type inner_msg =   (* the type of messages that can be sent to update the state *)
-    | UpdateContent of string
-    | ToggleMode of bool
-    | SaveFile of string
-
-  let view model =   (* the state->vdom rendering function *)
-    let content_view = 
-      if model.editableMode then
-        Vdom.input ~a:[Vdom.Attr.value model.content; Vdom.Attr.on_input (fun s -> push_up_msg (UpdateContent s))] ()
-      else
-        Vdom.text model.content
-    in
-    let mode_toggle = 
-      Vdom.button ~a:[Vdom.Attr.on_click (fun _ -> push_up_msg (ToggleMode (not model.editableMode)))] 
-        (if model.editableMode then "Switch to View Mode" else "Switch to Edit Mode")
-    in
-    let save_button = 
-      Vdom.button ~a:[Vdom.Attr.on_click (fun _ -> push_up_msg (SaveFile model.filePath))] "Save"
-    in
-    Vdom.div [
-      content_view;
-      mode_toggle;
-      save_button;
-    ]
-
-  let init = {
+let init =
+  {
     content = "";
-    editableMarkdown = false;
-    editableMode = false;
-    filePath = "";
+    editable_markdown = false;
+    editable_mode = false;
+    file_path = "";
   }
 
-  let update model = function
-    | UpdateContent new_content -> { model with content = new_content }
-    | ToggleMode new_mode -> { model with editableMode = new_mode }
-    | SaveFile _path -> 
-        (* Here you would implement the logic to save the content to a file *)
-        (* For now, we just return the model unchanged *)
-        model
-end
+(** Replace what the pane shows. The application calls this when a file has
+    just been read, or when the native side pushes a line — neither is a user
+    edit, so neither goes through [update]. *)
+let set_content model content = { model with content }
+
+(** Point the pane at another file, so that [SaveFile] carries the right path. *)
+let set_file_path model file_path = { model with file_path }
+
+let update model = function
+  | UpdateContent content -> return { model with content }
+  | ToggleMode editable_mode -> return { model with editable_mode }
+  | SaveFile _path ->
+      (* The native side exposes no write_file binding yet, so saving is still
+         a no-op; the message exists so that the button is already wired. *)
+      return model
+
+let view model =
+  let content =
+    if model.editable_mode then
+      (* A textarea, not an input: the pane holds whole files, which an input
+         would collapse onto a single line. *)
+      elt "textarea"
+        ~a:
+          [
+            class_ "editor-content";
+            value model.content;
+            oninput (fun s -> UpdateContent s);
+          ]
+        []
+    else elt "pre" ~a:[ class_ "editor-content" ] [ text model.content ]
+  in
+  div
+    ~a:[ class_ "editor" ]
+    [
+      div
+        ~a:[ class_ "editor-toolbar" ]
+        [
+          elt "button"
+            ~a:[ onclick (fun _ -> ToggleMode (not model.editable_mode)) ]
+            [ text (if model.editable_mode then "view" else "edit") ];
+          elt "button"
+            ~a:
+              [
+                onclick (fun _ -> SaveFile model.file_path);
+                disabled (model.file_path = "");
+              ]
+            [ text "save" ];
+        ];
+      content;
+    ]

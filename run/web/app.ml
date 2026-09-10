@@ -49,7 +49,7 @@ type node =
 
 and entry = { name : string; path : string; node : node }
 
-type 'inner_content_editor_msg msg =
+type msg =
   | Home_known of string  (** [home_dir] answered; the tree can be rooted *)
   | Path_edited of string
   | Open_clicked  (** re-root the tree on the typed path *)
@@ -60,22 +60,15 @@ type 'inner_content_editor_msg msg =
   | File_read of string
   | Pushed of string  (** the native side called [show] *)
   | Failed of string
-  | Content_Editor_Msg of 'inner_content_editor_msg
-  | Save_File of string * string  (** Save the content to a file *)
-
-(** define widget *)
-module ContentEditorWidget = ContentEditor.Make (struct
-  type 'inner_msg msg = 'inner_msg msg
-  let push_up_msg = ContentEditor.push_up_msg
-  let save_file path content = Save_File (path, content)
-end)
+  | Editor_msg of ContentEditor.msg  (** the content pane spoke *)
 
 (** The whole state of the UI. *)
 type model = {
   root : string;  (** directory shown at the top of the tree *)
   tree : entry list;  (** contents of [root] *)
   path : string;  (** the file path currently typed in the input *)
-  output : ContentEditorWidget.model;  (** what the output pane displays *)
+  editor : ContentEditor.model;  (** the content pane, a component of its own *)
+  error : string option;  (** last binding failure, shown above the pane *)
   reading : bool;  (** a file is being read *)
 }
 
@@ -145,7 +138,14 @@ let init =
             (fun home -> Home_known (to_string home)),
             fun e -> Failed e );
       ]
-    { root = ""; tree = []; path = ""; output = ContentEditorWidget.init; reading = false }
+    {
+      root = "";
+      tree = [];
+      path = "";
+      editor = ContentEditor.init;
+      error = None;
+      reading = false;
+    }
 
 let update model = function
   | Home_known home ->
@@ -158,12 +158,12 @@ let update model = function
      directory somewhere inside it. A listing that arrives after the tree has
      been re-rooted finds no matching path and is simply dropped. *)
   | Listed (path, listing) when path = model.root ->
-      Vdom.return { model with tree = decode_entries listing }
+      Vdom.return { model with tree = decode_entries listing; error = None }
   | Listed (path, listing) ->
       let expand _ = Expanded (decode_entries listing) in
       Vdom.return { model with tree = set_node path expand model.tree }
   | List_failed (path, e) when path = model.root ->
-      Vdom.return { model with tree = []; output = "error: " ^ e }
+      Vdom.return { model with tree = []; error = Some e }
   | List_failed (path, e) ->
       (* Put the directory back the way it was, so it can be tried again. *)
       let collapse _ = Collapsed in
@@ -171,7 +171,7 @@ let update model = function
         {
           model with
           tree = set_node path collapse model.tree;
-          output = "error: " ^ e;
+          error = Some e;
         }
   | Toggled entry -> (
       match entry.node with
@@ -194,14 +194,29 @@ let update model = function
                 (fun contents -> File_read (to_string contents)),
                 fun e -> Failed e );
           ]
-        { model with reading = true }
+        {
+          model with
+          (* The pane is pointed at the file before its contents arrive, so
+             that a save issued right after the read carries the right path. *)
+          editor = ContentEditor.set_file_path model.editor entry.path;
+          reading = true;
+          error = None;
+        }
   | File_read contents ->
-      Vdom.return { model with output = ContentEditorWidget.update model.output (ContentEditorWidget.UpdateContent contents); reading = false }
-  | Save_File (path, content) ->
-      Vdom.return { model with output = ContentEditorWidget.update model.output (ContentEditorWidget.UpdateContent content) }
-  | Pushed text -> Vdom.return { model with output = text }
-  | Failed e ->
-      Vdom.return { model with output = "error: " ^ e; reading = false }
+      Vdom.return
+        {
+          model with
+          editor = ContentEditor.set_content model.editor contents;
+          reading = false;
+        }
+  | Pushed text ->
+      Vdom.return { model with editor = ContentEditor.set_content model.editor text }
+  | Failed e -> Vdom.return { model with error = Some e; reading = false }
+  (* The pane runs its own update; whatever it asks for comes back here wrapped
+     in [Editor_msg], so the two message types never mix. *)
+  | Editor_msg m ->
+      let editor, cmd = ContentEditor.update model.editor m in
+      ({ model with editor }, Vdom.Cmd.map (fun m -> Editor_msg m) cmd)
 
 let rec view_entries entries =
   let open Vdom in
@@ -242,7 +257,7 @@ let rec view_entries entries =
          elt "li" ~key:e.path (row :: children))
        entries)
 
-let view { root; tree; path; output; reading } =
+let view { root; tree; path; editor; error; reading } =
   let open Vdom in
   let cannot_open = reading || String.trim path = "" in
   div
@@ -279,9 +294,15 @@ let view { root; tree; path; output; reading } =
           view_entries tree;
         ];
       (* The id is kept so the rules of style.css still apply. *)
-      elt "pre"
+      div
         ~a:[ attr "id" "out" ]
-        [ text (if reading then "reading\xe2\x80\xa6" else output) ];
+        ((match error with
+         | Some e -> [ elt "p" ~a:[ class_ "error" ] [ text ("error: " ^ e) ] ]
+         | None -> [])
+        @ [
+            (if reading then text "reading\xe2\x80\xa6"
+             else Vdom.map (fun m -> Editor_msg m) (ContentEditor.view editor));
+          ]);
     ]
 
 let app = Vdom.app ~init ~update ~view ()

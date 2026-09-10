@@ -124,8 +124,11 @@ button.row:hover {
   cursor: default;
 }
 
-/* Right column: the output pane, full height, scrolling on its own. */
+/* Right column: the output pane, full height, scrolling on its own. It now
+   holds the content editor, so the verbatim rendering moved down to
+   .editor-content — the toolbar must not be laid out as preformatted text. */
 #out {
+  box-sizing: border-box;
   flex: 1 1 0;
   min-width: 0;
   margin: 0;
@@ -134,8 +137,51 @@ button.row:hover {
   border-radius: 6px;
   background: rgba(127, 127, 127, 0.15);
   font-size: 1rem;
-  /* File contents are shown verbatim, but long lines still wrap rather than
-     forcing the pane to scroll sideways. */
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* A binding failure, shown above the pane rather than in place of its
+   contents: an error no longer overwrites the file being read. */
+.error {
+  margin: 0;
+  color: #c62828;
+  overflow-wrap: anywhere;
+}
+
+.editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.editor-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Whether it is the <pre> viewer or the <textarea> editor, the content takes
+   the height the toolbar leaves. File contents are shown verbatim, but long
+   lines still wrap rather than forcing the pane to scroll sideways. */
+.editor-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  font: inherit;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  overflow: auto;
+}
+
+textarea.editor-content {
+  padding: 0.25rem;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  resize: none;
 }
