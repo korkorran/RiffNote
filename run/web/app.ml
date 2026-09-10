@@ -37,6 +37,7 @@ let register : string -> 'a -> unit =
 (** The whole state of the UI. *)
 type model = {
   output : string;  (** what the output pane displays *)
+  path : string;  (** the file path currently typed in the input *)
   pending : bool;  (** a binding call is in flight *)
 }
 
@@ -48,6 +49,9 @@ type msg =
       (** [os_type] resolved; the text itself reaches us through [show], since
           that binding answers by evaluating JavaScript rather than by
           returning a result *)
+  | Path_edited of string  (** the file path input changed *)
+  | Read_clicked
+  | File_read of string  (** [read_file] resolved with the file contents *)
   | Pushed of string  (** the native side called [show] *)
   | Failed of string
 
@@ -72,7 +76,7 @@ let webview_cmds =
           | _ -> false);
     }
 
-let init = Vdom.return { output = ""; pending = false }
+let init = Vdom.return { output = ""; path = ""; pending = false }
 
 let update model = function
   | Add_clicked ->
@@ -90,25 +94,71 @@ let update model = function
       Vdom.return
         ~c:[ Call ("os_type", [||], (fun _ -> Os_answered), fun e -> Failed e) ]
         { model with pending = true }
-  | Added sum -> Vdom.return { output = sum; pending = false }
+  | Path_edited path -> Vdom.return { model with path }
+  | Read_clicked ->
+      Vdom.return
+        ~c:
+          [
+            Call
+              ( "read_file",
+                [| Jv.of_string model.path |],
+                (fun contents -> File_read contents),
+                fun e -> Failed e );
+          ]
+        { model with pending = true }
+  | File_read contents -> Vdom.return { model with output = contents; pending = false }
+  | Added sum -> Vdom.return { model with output = sum; pending = false }
   | Os_answered -> Vdom.return { model with pending = false }
   | Pushed text -> Vdom.return { model with output = text }
-  | Failed e -> Vdom.return { output = "error: " ^ e; pending = false }
+  | Failed e ->
+      Vdom.return { model with output = "error: " ^ e; pending = false }
 
-let view { output; pending } =
+let view { output; path; pending } =
   let open Vdom in
+  (* Reading needs a path, so the button follows the model rather than being
+     enabled and failing on an empty request. *)
+  let cannot_read = pending || String.trim path = "" in
   div
+    ~a:[ class_ "layout" ]
     [
-      elt "h2" [ text "owebview" ];
       div
-        ~a:[ class_ "actions" ]
+        ~a:[ class_ "controls" ]
         [
-          elt "button"
-            ~a:[ onclick (fun _ -> Add_clicked); disabled pending ]
-            [ text "add(20, 22)" ];
-          elt "button"
-            ~a:[ onclick (fun _ -> Os_clicked); disabled pending ]
-            [ text "OS type" ];
+          elt "h2" [ text "owebview" ];
+          div
+            ~a:[ class_ "actions" ]
+            [
+              elt "button"
+                ~a:[ onclick (fun _ -> Add_clicked); disabled pending ]
+                [ text "add(20, 22)" ];
+              elt "button"
+                ~a:[ onclick (fun _ -> Os_clicked); disabled pending ]
+                [ text "OS type" ];
+            ];
+          div
+            ~a:[ class_ "actions" ]
+            [
+              input
+                ~a:
+                  [
+                    type_ "text";
+                    class_ "path";
+                    value path;
+                    attr "placeholder" "/path/to/file";
+                    oninput (fun s -> Path_edited s);
+                    (* Enter reads too: a path input that only answers to the
+                       button would be a surprise. *)
+                    onkeydown_cancel (fun (e : key_event) ->
+                        if e.which = 13 && not cannot_read then
+                          Some Read_clicked
+                        else None);
+                    disabled pending;
+                  ]
+                [];
+              elt "button"
+                ~a:[ onclick (fun _ -> Read_clicked); disabled cannot_read ]
+                [ text "read file" ];
+            ];
         ];
       (* The id is kept so the rules of style.css still apply. *)
       elt "pre" ~a:[ attr "id" "out" ] [ text output ];
@@ -123,7 +173,7 @@ let run () =
     Option.get (Js_browser.Document.get_element_by_id Js_browser.document "app")
   in
   let running = Vdom_blit.run ~env:webview_cmds ~container app in
-  (* hellowv.ml evaluates show("...") both to forward a line typed in the
+  (* main.ml evaluates show("...") both to forward a line typed in the
      terminal and to answer the os_type binding. Injecting it as a message
      keeps that path identical to a click: the view stays the only thing that
      touches the DOM. *)

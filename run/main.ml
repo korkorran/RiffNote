@@ -5,7 +5,9 @@ let () =
 
   let w = Webview.create ~debug:true () in
   Webview.set_title w "Hello from OCaml";
-  Webview.set_size w ~width:480 ~height:320 Webview.Hint_none;
+  (* Two columns side by side need more room than the 480x320 the example
+     started with, and the output pane is now meant to hold a whole file. *)
+  Webview.set_size w ~width:900 ~height:600 Webview.Hint_none;
 
   (* Native handles (opaque pointers, for platform-specific FFI such as a file
      dialog). 0n means unavailable. *)
@@ -30,6 +32,30 @@ let () =
       in
       Webview.eval w result;
       Webview.return w id ~error:false ~result:"");
+
+  (* Expose window.read_file(path) to JS. It resolves with the contents of the
+     file as a string, or rejects with an error message.
+
+     [Webview.return] wants a JSON value, so both the contents and the error go
+     through [Utils.js_quote], which produces a quoted literal that is valid
+     JSON too. A file that is not valid UTF-8 would therefore not survive the
+     trip: this reads text files, not arbitrary bytes.
+
+     The read happens on the UI thread, so a very large file would freeze the
+     window while it is loaded; the terminal reader below shows the pattern to
+     move that off the UI thread if it ever matters. *)
+  Webview.bind w "read_file" (fun id req ->
+      Printf.printf "binding called <read_file>: id=%s req=%s\n%!" id req;
+      match Utils.json_string_arg req with
+      | None ->
+          Webview.return w id ~error:true
+            ~result:(Utils.js_quote "read_file expects a file path as a string")
+      | Some path -> (
+          match In_channel.with_open_bin path In_channel.input_all with
+          | contents ->
+              Webview.return w id ~error:false ~result:(Utils.js_quote contents)
+          | exception Sys_error msg ->
+              Webview.return w id ~error:true ~result:(Utils.js_quote msg)));
 
   (* Load the page from on-disk files (web/) instead of an inline HTML string.
      The CSS and JS referenced with relative paths in index.html are resolved
