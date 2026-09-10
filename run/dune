@@ -1,5 +1,5 @@
 (executable
- (name hellowv)
+ (name main)
  ; threads.posix: the console reader runs on a background thread, so that
  ; input_line does not block the webview event loop.
  (libraries owebview unix threads.posix))
