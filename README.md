@@ -1,4 +1,4 @@
-# NoteRiff
+# RiffNote
 
 A note-taking app written in OCaml
 

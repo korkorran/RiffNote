@@ -240,7 +240,7 @@ let view { root; tree; path; output; reading } =
       div
         ~a:[ class_ "controls" ]
         [
-          elt "h2" [ text "owebview" ];
+          elt "h2" [ text "RiffNote" ];
           div
             ~a:[ class_ "actions" ]
             [
