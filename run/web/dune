@@ -1,6 +1,6 @@
 (executable
  (name app)
- (libraries brr)
+ (libraries brr vdom)
  (js_of_ocaml
   (flags
    (:standard --target-env browser)))
