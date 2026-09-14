@@ -43,6 +43,8 @@ type msg =
   | Created of string * string  (** [create_file] answered: parent, path *)
   | Create_failed of string
   | Root_picker_set of bool  (** show or hide the path field *)
+  | Path_paste of int * int  (** the paste shortcut, over that selection *)
+  | Path_pasted of int * int * string
 
 (** The only things the explorer has to say to the outside world. Everything
     else it handles on its own. *)
@@ -230,6 +232,29 @@ let update model = function
       (* [creating] is kept: the name is still there, ready to be corrected. *)
       return { model with error = Some e }
   | Root_picker_set choosing_root -> return { model with choosing_root }
+  | Path_paste (start, stop) ->
+      return
+        ~c:[ Clipboard.read (fun text -> Path_pasted (start, stop, text)) ]
+        model
+  | Path_pasted (start, stop, text) ->
+      (* The field is one line, so the newline that comes with a path copied
+         from a terminal or from Finder is dropped rather than pasted — which
+         is what a browser does with a multi-line paste into an input. *)
+      let text =
+        String.concat ""
+          (String.split_on_char '\n' text |> List.concat_map (String.split_on_char '\r'))
+      in
+      (* The selection is the field's, and the field is drawn from [path]; they
+         agree, but clamping costs nothing and a [String.sub] that does not
+         raises. *)
+      let n = String.length model.path in
+      let start = max 0 (min start n) in
+      let stop = max start (min stop n) in
+      let path =
+        String.sub model.path 0 start ^ text
+        ^ String.sub model.path stop (n - stop)
+      in
+      return { model with path }
 
 (* A folder, drawn rather than written. The rest of the tree is monochrome
    glyphs that follow the text colour, which an emoji would neither do nor
@@ -383,6 +408,10 @@ let view model =
                     attr "placeholder" "/path/to/folder";
                     (* Revealed to be typed in, so it takes the caret with it. *)
                     autofocus;
+                    (* The window has no Edit menu, so the paste shortcut has to
+                       be served by the page; see clipboard.ml. *)
+                    Clipboard.on_shortcut (fun start stop ->
+                        Path_paste (start, stop));
                     oninput (fun s -> Path_edited s);
                     (* Enter opens too: a path input that only answers to the
                        button would be a surprise. Escape folds it back. *)

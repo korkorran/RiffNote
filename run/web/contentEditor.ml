@@ -21,6 +21,8 @@ type msg =
   | Close_requested of string
   | Close_confirmed of string
   | Close_cancelled of string
+  | Paste_requested of int * int  (** the paste shortcut, over that selection *)
+  | Pasted of int * int * string
 
 (** Where the last save of one tab got to. It is reported next to the button
     rather than silently: a save that failed and a save that never happened
@@ -192,6 +194,30 @@ let update model = function
           model with
           tabs = set_tab path (fun tab -> { tab with closing = false }) model.tabs;
         }
+  | Paste_requested (start, stop) ->
+      return ~c:[ Clipboard.read (fun text -> Pasted (start, stop, text)) ] model
+  | Pasted (start, stop, text) -> (
+      match model.active with
+      | None -> return model
+      | Some path ->
+          (* Unlike the explorer's one-line path field, newlines are kept here:
+             pasting several lines into a document is the point of it. *)
+          let splice tab =
+            (* The selection is the textarea's, and the textarea is drawn from
+               [content]; they agree, but clamping costs nothing and a
+               [String.sub] that does not agree raises. *)
+            let n = String.length tab.content in
+            let start = max 0 (min start n) in
+            let stop = max start (min stop n) in
+            let content =
+              String.sub tab.content 0 start ^ text
+              ^ String.sub tab.content stop (n - stop)
+            in
+            (* Pasting is editing, so it invalidates the last save like typing
+               does. *)
+            { tab with content; status = Idle }
+          in
+          return { model with tabs = set_tab path splice model.tabs })
 
 let status_view = function
   | Idle -> []
@@ -295,6 +321,10 @@ let view model =
                 class_ "editor-content";
                 value tab.content;
                 oninput (fun s -> UpdateContent s);
+                (* The window has no Edit menu, so the paste shortcut has to be
+                   served by the page; see clipboard.ml. *)
+                Clipboard.on_shortcut (fun start stop ->
+                    Paste_requested (start, stop));
               ]
             []
         else

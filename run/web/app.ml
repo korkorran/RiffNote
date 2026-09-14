@@ -70,7 +70,8 @@ let run () =
   let container =
     Option.get (Js_browser.Document.get_element_by_id Js_browser.document "app")
   in
-  ignore (Vdom_blit.run ~env:Binding.env ~container app)
+  let env = Vdom_blit.merge [ Binding.env; Clipboard.env ] in
+  ignore (Vdom_blit.run ~env ~container app)
 
 let () =
   Js_browser.Window.add_event_listener Js_browser.window
