@@ -35,8 +35,9 @@ let () =
      trip: this reads text files, not arbitrary bytes.
 
      The read happens on the UI thread, so a very large file would freeze the
-     window while it is loaded; the terminal reader below shows the pattern to
-     move that off the UI thread if it ever matters. *)
+     window while it is loaded. Moving it off that thread means doing the work
+     in a [Thread] and calling [Webview.dispatch] to come back, since the
+     webview may only be touched from the thread that called [run]. *)
   Webview.bind w "read_file" (fun id req ->
       Printf.printf "binding called <read_file>: id=%s req=%s\n%!" id req;
       match Utils.json_string_arg req with
@@ -141,32 +142,6 @@ let () =
      location, so it works both installed and from the build tree. *)
   let index = Filename.concat (Webview.Utils.web_dir ()) "index.html" in
   Webview.navigate w ("file://" ^ index);
-
-  (* Forward the terminal to the page: every line typed here is displayed in
-     <pre id="out"> by the [show] function that app.ml registered on the global
-     object.
-
-     [input_line] blocks, so it runs on its own thread. The webview must only
-     be touched from the UI thread (the one that called [run]), so the JS call
-     goes through [dispatch] rather than being evaluated directly. *)
-  Printf.printf "type a message and press <Enter> to display it in the window\n%!";
-  let _ =
-    Thread.create
-      (fun () ->
-        try
-          while true do
-            let line = input_line stdin in
-            (* [show] only exists once app.js has run its DOMContentLoaded
-               handler; guard against a message typed before the page loads. *)
-            let js =
-              Printf.sprintf "if (typeof show === 'function') show(%s);"
-                (Utils.js_quote line)
-            in
-            Webview.dispatch w (fun w -> Webview.eval w js)
-          done
-        with End_of_file -> ())
-      ()
-  in
 
   Webview.run w;
   Webview.destroy w

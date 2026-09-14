@@ -168,6 +168,79 @@ button.row:hover {
   gap: 0.5rem;
 }
 
+/* The strip of open files, above the toolbar. It scrolls sideways rather than
+   wrapping: a second row would shift the toolbar under the reader's cursor. */
+.tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.25rem;
+  overflow-x: auto;
+}
+
+.tab {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.15);
+}
+
+.tab.active {
+  background: rgba(127, 127, 127, 0.35);
+}
+
+/* The global button rule is meant for the actions; inside a tab it would make
+   the strip twice as tall as it needs to be. */
+.tab button {
+  padding: 0.2rem 0.35rem;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.tab button:hover {
+  background: rgba(127, 127, 127, 0.25);
+}
+
+.tab-name {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-close {
+  opacity: 0.55;
+}
+
+/* A modified tab shows a dot in place of the cross, so that the strip says
+   what would be lost before anything is clicked. */
+.tab-close.modified {
+  opacity: 1;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* The confirmation is asked inside the tab itself rather than in a dialog. */
+.tab.closing {
+  background: rgba(198, 40, 40, 0.25);
+}
+
+.tab-confirm {
+  padding-left: 0.2rem;
+  font-size: 0.85rem;
+}
+
+/* Nothing open yet: the strip is empty and there is no toolbar to show. */
+.empty {
+  margin: 0;
+  opacity: 0.6;
+}
+
 .editor-toolbar {
   flex: 0 0 auto;
   display: flex;

@@ -11,7 +11,6 @@
    it. *)
 
 type msg =
-  | Pushed of string  (** the native side called [show] *)
   | Explorer_msg of FileExplorer.msg
   | Editor_msg of ContentEditor.msg
 
@@ -29,20 +28,11 @@ let init =
     between the two panes. *)
 let apply_out model = function
   | FileExplorer.File_opened (path, contents) ->
-      {
-        model with
-        editor =
-          ContentEditor.set_content
-            (ContentEditor.set_file_path model.editor path)
-            contents;
-      }
+      { model with editor = ContentEditor.open_file model.editor ~path ~contents }
 
 (* Each pane runs its own update; whatever it produces comes back wrapped, so
    the message types never mix. *)
 let update model = function
-  | Pushed text ->
-      Vdom.return
-        { model with editor = ContentEditor.set_content model.editor text }
   | Explorer_msg m ->
       let explorer, cmd, out = FileExplorer.update model.explorer m in
       ( List.fold_left apply_out { model with explorer } out,
@@ -65,10 +55,12 @@ let view { explorer; editor } =
       (* The id is kept so the rules of style.css still apply. *)
       div
         ~a:[ attr "id" "out" ]
-        [
-          (if FileExplorer.is_reading explorer then text "reading\xe2\x80\xa6"
-           else map (fun m -> Editor_msg m) (ContentEditor.view editor));
-        ];
+        ((* A read in flight is announced above the editor rather than in place
+            of it: replacing the pane would take the tab strip away with it. *)
+         (if FileExplorer.is_reading explorer then
+            [ elt "p" ~a:[ class_ "status" ] [ text "reading\xe2\x80\xa6" ] ]
+          else [])
+        @ [ map (fun m -> Editor_msg m) (ContentEditor.view editor) ]);
     ]
 
 let app = Vdom.app ~init ~update ~view ()
@@ -79,12 +71,7 @@ let run () =
   let container =
     Option.get (Js_browser.Document.get_element_by_id Js_browser.document "app")
   in
-  let running = Vdom_blit.run ~env:Binding.env ~container app in
-  (* main.ml evaluates show("...") to forward a line typed in the terminal.
-     Injecting it as a message keeps that path identical to a click: the view
-     stays the only thing that touches the DOM. *)
-  Binding.register "show" (fun (s : Jstr.t) ->
-      Vdom_blit.process running (Pushed (Jstr.to_string s)))
+  ignore (Vdom_blit.run ~env:Binding.env ~container app)
 
 let () =
   Js_browser.Window.add_event_listener Js_browser.window
