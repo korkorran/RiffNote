@@ -1,6 +1,6 @@
 (executable
  (name app)
- (modules app contentEditor)
+ (modules app binding contentEditor fileExplorer)
  (libraries brr vdom)
  (js_of_ocaml
   (flags
