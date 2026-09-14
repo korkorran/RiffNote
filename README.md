@@ -1,10 +1,11 @@
 <p align="center">
-![logo](./logo.png)
+  <img src="./logo.png" width="200" alt="sun-notes">
 </p>
+<h1 align=center>Sun notes</h1>
+<p align="center">A note-taking app written in OCaml</p>
+<br/>
 
-# Sun notes
-
-A note-taking app written in OCaml
+Implemented with the libraries Owebview for the desktop-GUI bindings and Vdom for the web rendering.
 
 ![Screenshot of Sun notes](./screenshot.jpg)
 
