@@ -2,35 +2,24 @@
 
 A note-taking app written in OCaml
 
-## Setup
+## Contribute
 
-Requires [opam](https://opam.ocaml.org/doc/Install.html).
+Clone the repository.
 
-Create a local switch (a `_opam` directory at the root of the project) with the
-latest OCaml compiler:
-
-```sh
-opam switch create . ocaml-base-compiler.5.5.1 --no-install
-```
-
-Install the dependencies:
+All the dependencies can be installed with the command
 
 ```sh
-opam install brr owebview.0.1.0 vdom
+opam install . --deps-only
 ```
+The project depends on owebview so on Windows, prior to 'opam install .', run the command `nuget install Microsoft.Web.WebView2` to install the WebView2 SDK.
 
-Then load the switch environment in your shell:
+To run the app :
 
 ```sh
-eval $(opam env)
+dune build
+dune exec run/main.exe
 ```
 
-`opam` picks up the local switch automatically when you run commands from the
-project directory, so `opam exec -- dune build` works without the `eval` step.
+## License
 
-### Native dependencies
-
-`owebview` binds the system web engine: nothing to install on macOS (WebKit and
-Cocoa ship with the system) or Windows (the WebView2 runtime ships with Windows
-10 and 11). On Linux, opam pulls in `conf-gtk3-webkit`, which expects
-`gtk+-3.0` and `webkit2gtk-4.1` to be available through your package manager.
+MIT
