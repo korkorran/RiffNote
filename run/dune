@@ -1,6 +1,9 @@
 (executable
  (name main)
- (libraries owebview unix))
+ ; lwt.unix brings Lwt together with Lwt_unix, Lwt_io and Lwt_preemptive;
+ ; threads.posix is what lets the Lwt event loop have a thread of its own,
+ ; since the webview keeps the process's main thread.
+ (libraries owebview unix lwt.unix threads.posix))
 
 ; Stage the web/ assets next to the built binary (_build/.../examples/web/) so
 ; the example is self-contained in the build tree — without installing them
