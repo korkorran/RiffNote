@@ -57,11 +57,20 @@ button {
   cursor: pointer;
 }
 
-/* The path the tree is rooted at. */
+/* The path the tree is rooted at, and the "+" that adds a file beside its
+   contents. */
 .root {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
   margin: 0 0 0.5rem;
   font-size: 0.8rem;
   opacity: 0.7;
+}
+
+.root-path {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -110,6 +119,80 @@ button {
 
 button.row:hover {
   background: rgba(127, 127, 127, 0.15);
+}
+
+/* A directory line is the row plus the button that adds a file to it. They
+   share a wrapper because a button cannot nest inside a button. */
+.row-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.row-wrap > .row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The "+" of a directory, and of the root line. It stays invisible until the
+   line it belongs to is pointed at, so that a column of them does not compete
+   with the file names.
+
+   Hidden with [opacity] rather than [display] on purpose: the button keeps its
+   place in the row, so revealing it does not shift the name beside it. */
+.add {
+  flex: 0 0 auto;
+  padding: 0 0.35rem;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.row-wrap:hover > .add,
+.root:hover > .add {
+  opacity: 0.55;
+}
+
+/* Also on focus: a control that only exists under the mouse could not be
+   reached with the keyboard at all. */
+.add:hover,
+.add:focus {
+  opacity: 1;
+  background: rgba(127, 127, 127, 0.25);
+}
+
+/* The row a new file is named in, sitting inside the directory it will land
+   in. */
+.new-file {
+  gap: 0.25rem;
+  cursor: default;
+}
+
+.new-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.1rem 0.25rem;
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.new-file button {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.3rem;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.new-file button:hover {
+  background: rgba(127, 127, 127, 0.25);
 }
 
 .marker {

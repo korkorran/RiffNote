@@ -29,6 +29,8 @@ let init =
 let apply_out model = function
   | FileExplorer.File_opened (path, contents) ->
       { model with editor = ContentEditor.open_file model.editor ~path ~contents }
+  | FileExplorer.File_created path ->
+      { model with editor = ContentEditor.open_new_file model.editor ~path }
 
 (* Each pane runs its own update; whatever it produces comes back wrapped, so
    the message types never mix. *)

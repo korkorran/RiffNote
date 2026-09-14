@@ -136,6 +136,31 @@ let () =
               (Utils.js_quote
                  "write_file expects a file path and its contents, as strings"));
 
+  (* Expose window.create_file(path) to JS. It creates an empty file and
+     resolves with its path, or rejects.
+
+     [Open_excl] rather than a [Sys.file_exists] check beforehand: the kernel
+     refuses to create a path that already exists, which leaves no window
+     between the test and the creation. This binding adds a file to a
+     directory, it never replaces one — that is what write_file is for. *)
+  Webview.bind w "create_file" (fun id req ->
+      Printf.printf "binding called <create_file>: id=%s req=%s\n%!" id req;
+      match Utils.json_string_arg req with
+      | None ->
+          Webview.return w id ~error:true
+            ~result:
+              (Utils.js_quote "create_file expects a file path as a string")
+      | Some path -> (
+          match
+            Out_channel.with_open_gen
+              [ Open_wronly; Open_creat; Open_excl; Open_binary ]
+              0o644 path
+              (fun _ -> ())
+          with
+          | () -> Webview.return w id ~error:false ~result:(Utils.js_quote path)
+          | exception Sys_error msg ->
+              Webview.return w id ~error:true ~result:(Utils.js_quote msg)));
+
   (* Load the page from on-disk files (web/) instead of an inline HTML string.
      The CSS and JS referenced with relative paths in index.html are resolved
      relative to that file. We locate the web/ directory from the executable

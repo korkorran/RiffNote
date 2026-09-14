@@ -61,10 +61,10 @@ let active_tab model =
 let set_tab path f tabs =
   List.map (fun tab -> if tab.path = path then f tab else tab) tabs
 
-(** Show [path]. A file that is already open is only brought to the front:
-    reading it again would throw away whatever has been typed into it since,
-    which is not what clicking a name in the tree asks for. *)
-let open_file model ~path ~contents =
+(* Show [path]. A file that is already open is only brought to the front:
+   reading it again would throw away whatever has been typed into it since,
+   which is not what clicking a name in the tree asks for. *)
+let open_tab model ~path ~contents ~editable =
   let model = { model with active = Some path } in
   if List.exists (fun tab -> tab.path = path) model.tabs then model
   else
@@ -74,7 +74,7 @@ let open_file model ~path ~contents =
         content = contents;
         saved_content = contents;
         editable_markdown = false;
-        editable_mode = false;
+        editable_mode = editable;
         status = Idle;
         closing = false;
       }
@@ -82,6 +82,14 @@ let open_file model ~path ~contents =
     (* Appended rather than prepended: a new tab belongs at the end of the
        strip, where the eye last left it. *)
     { model with tabs = model.tabs @ [ tab ] }
+
+(** Show the contents of a file read from disk. *)
+let open_file model ~path ~contents =
+  open_tab model ~path ~contents ~editable:false
+
+(** Show a file that has just been created: empty, and straight in edit mode,
+    since it was asked for in order to be written in. *)
+let open_new_file model ~path = open_tab model ~path ~contents:"" ~editable:true
 
 (** Drop the tab at [path]. What takes its place is the tab on its right, or
     failing that the one on its left — closing the last tab of a strip should

@@ -8,9 +8,13 @@
 type model
 type msg
 
-(** The one thing the explorer needs the application for: a file is open, and
+(** What the explorer needs the application for: it has a file in hand, and
     something else has to display it. *)
-type out_msg = File_opened of string * string  (** path, contents *)
+type out_msg =
+  | File_opened of string * string  (** path, contents *)
+  | File_created of string
+      (** path; the file was just created, so it is empty and its tab is meant
+          to open ready to be typed into. *)
 
 val init : model * msg Vdom.Cmd.t
 (** Starts empty, and asks the native side for the home directory to root the
