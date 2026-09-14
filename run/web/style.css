@@ -35,10 +35,6 @@ body {
   flex-direction: column;
 }
 
-h2 {
-  margin-top: 0;
-}
-
 .actions {
   display: flex;
   gap: 0.5rem;

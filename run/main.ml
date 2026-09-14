@@ -4,7 +4,7 @@ let () =
   Printf.printf "using webview %s\n%!" v.Webview.version_number;
 
   let w = Webview.create ~debug:true () in
-  Webview.set_title w "Hello from OCaml";
+  Webview.set_title w "Sun notes";
   (* Two columns side by side need more room than the 480x320 the example
      started with, and the output pane is now meant to hold a whole file. *)
   Webview.set_size w ~width:900 ~height:600 Webview.Hint_none;

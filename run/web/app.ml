@@ -48,10 +48,7 @@ let view { explorer; editor } =
     [
       div
         ~a:[ class_ "controls" ]
-        [
-          elt "h2" [ text "RiffNote" ];
-          map (fun m -> Explorer_msg m) (FileExplorer.view explorer);
-        ];
+        [ map (fun m -> Explorer_msg m) (FileExplorer.view explorer) ];
       (* The id is kept so the rules of style.css still apply. *)
       div
         ~a:[ attr "id" "out" ]
