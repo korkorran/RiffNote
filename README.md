@@ -9,6 +9,12 @@ Implemented with the libraries Owebview for the desktop-GUI bindings and Vdom fo
 
 ![Screenshot of Sun notes](./screenshot.jpg)
 
+## Download
+
+Click on the "Releases" link of the Github page of the repository to access the installers.
+
+For now only MacOS with arm64 architecture (M-series) is provided.
+
 ## Contribute
 
 Clone the repository.
