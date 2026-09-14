@@ -1,6 +1,12 @@
+<p align="center">
+![logo](./logo.png)
+</p>
+
 # Sun notes
 
 A note-taking app written in OCaml
+
+![Screenshot of Sun notes](./screenshot.jpg)
 
 ## Contribute
 
