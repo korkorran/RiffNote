@@ -42,6 +42,7 @@ type msg =
   | Create_submitted
   | Created of string * string  (** [create_file] answered: parent, path *)
   | Create_failed of string
+  | Root_picker_set of bool  (** show or hide the path field *)
 
 (** The only things the explorer has to say to the outside world. Everything
     else it handles on its own. *)
@@ -55,6 +56,7 @@ type model = {
   path : string;  (** the path currently typed in the input *)
   reading : bool;  (** a file is being read *)
   creating : creating option;  (** a new file is being named *)
+  choosing_root : bool;  (** the path field is showing *)
   error : string option;  (** last binding failure, shown above the tree *)
 }
 
@@ -90,6 +92,7 @@ let init =
       path = "";
       reading = false;
       creating = None;
+      choosing_root = false;
       error = None;
     },
     Cmd.batch
@@ -146,7 +149,16 @@ let update model = function
      directory somewhere inside it. A listing that arrives after the tree has
      been re-rooted finds no matching path and is simply dropped. *)
   | Listed (path, listing) when path = model.root ->
-      return { model with tree = decode_entries listing; error = None }
+      (* The directory answered, so the field that asked for it has done its
+         job and folds away. A path that fails leaves it open instead, to be
+         corrected without being reopened. *)
+      return
+        {
+          model with
+          tree = decode_entries listing;
+          choosing_root = false;
+          error = None;
+        }
   | Listed (path, listing) ->
       let expand _ = Expanded (decode_entries listing) in
       return { model with tree = set_node path expand model.tree }
@@ -217,6 +229,43 @@ let update model = function
   | Create_failed e ->
       (* [creating] is kept: the name is still there, ready to be corrected. *)
       return { model with error = Some e }
+  | Root_picker_set choosing_root -> return { model with choosing_root }
+
+(* A folder, drawn rather than written. The rest of the tree is monochrome
+   glyphs that follow the text colour, which an emoji would neither do nor
+   render the same way from one font to the next. *)
+let folder_icon =
+  svg_elt "svg"
+    ~a:
+      [
+        attr "viewBox" "0 0 16 16";
+        attr "width" "13";
+        attr "height" "13";
+        attr "aria-hidden" "true";
+      ]
+    [
+      svg_elt "path"
+        ~a:
+          [
+            attr "fill" "currentColor";
+            attr "d"
+              "M1.5 3h4l1.5 2h7.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-13a1 1 0 0 \
+               1-1-1V4a1 1 0 0 1 1-1z";
+          ]
+        [];
+    ]
+
+(** Reveals or hides the field that re-roots the tree. It sits on the root
+    line, beside the directory it would replace. *)
+let folder_button showing =
+  elt "button"
+    ~a:
+      [
+        class_ "folder";
+        attr "title" "open another folder";
+        onclick (fun _ -> Root_picker_set (not showing));
+      ]
+    [ folder_icon ]
 
 (** The "+" that starts naming a file inside [dir]. *)
 let add_button dir =
@@ -318,37 +367,47 @@ let view model =
   let cannot_open = model.reading || String.trim model.path = "" in
   div
     ~a:[ class_ "explorer" ]
-    ([
-       div
-         ~a:[ class_ "actions" ]
-         [
-           input
-             ~a:
-               [
-                 type_ "text";
-                 class_ "path";
-                 value model.path;
-                 attr "placeholder" "/path/to/folder";
-                 oninput (fun s -> Path_edited s);
-                 (* Enter opens too: a path input that only answers to the
-                    button would be a surprise. *)
-                 onkeydown_cancel (fun (e : key_event) ->
-                     if e.which = 13 && not cannot_open then Some Open_clicked
-                     else None);
-               ]
-             [];
-           elt "button"
-             ~a:[ onclick (fun _ -> Open_clicked); disabled cannot_open ]
-             [ text "open" ];
-         ];
-       (* The root is a directory like any other, so it gets a "+" too —
-          without one there would be no way to add a file beside the ones the
-          tree opens on. *)
-       div
-         ~a:[ class_ "root" ]
-         (elt "span" ~a:[ class_ "root-path" ] [ text model.root ]
-         :: (if model.root = "" then [] else [ add_button model.root ]));
-     ]
+    ((* Hidden until the folder button asks for it: the tree is what the column
+        is for, and the path of another directory is wanted rarely. *)
+     (if model.choosing_root then
+        [
+          div
+            ~a:[ class_ "actions" ]
+            [
+              input
+                ~a:
+                  [
+                    type_ "text";
+                    class_ "path";
+                    value model.path;
+                    attr "placeholder" "/path/to/folder";
+                    (* Revealed to be typed in, so it takes the caret with it. *)
+                    autofocus;
+                    oninput (fun s -> Path_edited s);
+                    (* Enter opens too: a path input that only answers to the
+                       button would be a surprise. Escape folds it back. *)
+                    onkeydown_cancel (fun (e : key_event) ->
+                        if e.which = 13 && not cannot_open then Some Open_clicked
+                        else if e.which = 27 then Some (Root_picker_set false)
+                        else None);
+                  ]
+                [];
+              elt "button"
+                ~a:[ onclick (fun _ -> Open_clicked); disabled cannot_open ]
+                [ text "open" ];
+            ];
+        ]
+      else [])
+    @ [
+        (* The root is a directory like any other, so it gets a "+" too —
+           without one there would be no way to add a file beside the ones the
+           tree opens on. *)
+        div
+          ~a:[ class_ "root" ]
+          ((folder_button model.choosing_root
+           :: [ elt "span" ~a:[ class_ "root-path" ] [ text model.root ] ])
+          @ if model.root = "" then [] else [ add_button model.root ]);
+      ]
     @ (match model.error with
       | Some e -> [ elt "p" ~a:[ class_ "error" ] [ text ("error: " ^ e) ] ]
       | None -> [])

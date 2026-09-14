@@ -65,13 +65,38 @@ button {
   gap: 0.25rem;
   margin: 0 0 0.5rem;
   font-size: 0.8rem;
-  opacity: 0.7;
 }
 
+/* The dimming belongs to the path itself: on the line as a whole it would be
+   applied twice to the buttons, which carry their own. */
 .root-path {
   flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+  opacity: 0.7;
+}
+
+/* The button that reveals the path field. Unlike the "+" it is always visible:
+   it is the only way to another directory, so hiding it until hover would hide
+   the way out. */
+.folder {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 0.15rem 0.25rem;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+.folder:hover,
+.folder:focus {
+  opacity: 1;
+  background: rgba(127, 127, 127, 0.25);
 }
 
 /* The explorer is a component of its own, so it comes with its own element

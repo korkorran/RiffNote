@@ -1,4 +1,4 @@
-# RiffNote
+# Sun notes
 
 A note-taking app written in OCaml
 
