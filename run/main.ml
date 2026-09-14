@@ -102,6 +102,39 @@ let () =
           | exception Sys_error msg ->
               Webview.return w id ~error:true ~result:(Utils.js_quote msg)));
 
+  (* Expose window.write_file(path, contents) to JS. It resolves with the
+     number of bytes written, or rejects with an error message.
+
+     The file is truncated and rewritten in place, so an interrupted save
+     leaves it damaged rather than untouched; writing to a temporary file and
+     renaming it over the original is the way to make that atomic, once it
+     matters.
+
+     Like read_file, this runs on the UI thread, and the contents travel as a
+     JSON string: it writes text files, not arbitrary bytes. *)
+  Webview.bind w "write_file" (fun id req ->
+      (* [req] holds the whole file, so only the path is printed: echoing the
+         contents would dump the document into the terminal at every save. *)
+      match Utils.json_string_args req with
+      | Some [ path; contents ] -> (
+          Printf.printf "binding called <write_file>: id=%s path=%s bytes=%d\n%!"
+            id path (String.length contents);
+          match
+            Out_channel.with_open_bin path (fun oc ->
+                Out_channel.output_string oc contents)
+          with
+          | () ->
+              Webview.return w id ~error:false
+                ~result:(string_of_int (String.length contents))
+          | exception Sys_error msg ->
+              Webview.return w id ~error:true ~result:(Utils.js_quote msg))
+      | _ ->
+          Printf.printf "binding called <write_file>: id=%s (bad arguments)\n%!" id;
+          Webview.return w id ~error:true
+            ~result:
+              (Utils.js_quote
+                 "write_file expects a file path and its contents, as strings"));
+
   (* Load the page from on-disk files (web/) instead of an inline HTML string.
      The CSS and JS referenced with relative paths in index.html are resolved
      relative to that file. We locate the web/ directory from the executable

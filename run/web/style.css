@@ -172,6 +172,21 @@ button.row:hover {
   flex: 0 0 auto;
   display: flex;
   gap: 0.5rem;
+  align-items: center;
+}
+
+/* What became of the last save, beside the button that asked for it. */
+.status {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+
+/* A failed save is a status too, so it must not take the block layout the
+   explorer's error paragraph needs. */
+.status.error {
+  margin: 0;
+  opacity: 1;
 }
 
 /* Whether it is the <pre> viewer or the <textarea> editor, the content takes
