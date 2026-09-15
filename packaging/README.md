@@ -11,14 +11,37 @@ Each has to run *on* the platform it packages for; none of them cross-compile,
 because `ocamlopt` has no `--target` and emits code for the host. The two Linux
 packages and the Windows installer each have their own CI workflow —
 `.github/workflows/{deb,rpm,windows}.yml` — which builds it, installs it to
-check it, and on a tag attaches it to the GitHub release.
+check it, and publishes it to the GitHub release.
 
-The three publish **independently**: each attaches its file as soon as it is
-ready, so a build broken on one platform does not hold up the other two. The
-price is that a release can be incomplete with nothing saying so, so check
-that all three ran green before announcing a version. Their release jobs share
-one `concurrency` group, which is what stops them racing to create the same
-release — a concurrency group is repository-wide, not workflow-scoped. The macOS image is the one still built by hand, since GitHub's macOS
+## How publishing works
+
+**Pushing to the `releases` branch is what publishes.** Nothing else starts
+those workflows: not a push to `main`, not a pull request, not a tag on its
+own. To cut a release:
+
+```sh
+git tag 0.2.0
+git push origin 0.2.0         # the tag has to reach the remote
+git push origin HEAD:releases # this is what triggers the three workflows
+```
+
+The commit that lands on `releases` **must carry a tag**, and that tag names
+the release. If no tag points at that exact commit the run stops with an error
+rather than publish — a release labelled `0.2.0` but built from something that
+is not `0.2.0` cannot be taken back once people have downloaded it. Pushing
+the same tag to `releases` again replaces that release's files.
+
+Note the consequence of `releases` being the only trigger: a packaging
+regression is discovered when you try to publish, not before. If that becomes
+annoying, the fix is a build-only run on `main` — the same jobs minus
+`release`.
+
+The three workflows publish **independently**: each attaches its file as soon
+as it is ready, so a build broken on one platform does not hold up the other
+two. The price is that a release can be incomplete with nothing saying so, so
+check that all three ran green before announcing a version. Their release jobs
+share one `concurrency` group, which is what stops them racing to create the
+same release — a concurrency group is repository-wide, not workflow-scoped. The macOS image is the one still built by hand, since GitHub's macOS
 runners cannot notarise on their own and the image needs a Mac anyway.
 
 The Windows script is PowerShell rather than bash: it drives Windows tools

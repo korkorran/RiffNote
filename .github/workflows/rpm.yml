@@ -1,10 +1,17 @@
-# Builds the RPM package and, on a tag, attaches it to the GitHub release.
+# Builds the RPM package and publishes it to the GitHub release.
 #
-# One of three package workflows, alongside rpm.yml and windows.yml. They
-# publish independently: each attaches its own file to the GitHub release as
-# soon as it is ready, so a build broken on one platform no longer holds up the
-# other two. The price is that a release can be incomplete with nothing saying
-# so — check that all three ran green before announcing a version.
+# Pushing to the releases branch is what publishes. Nothing else starts this
+# workflow: not a push to main, not a pull request, not a tag on its own. The
+# commit pushed to releases must carry a tag, and that tag names the release —
+# the run fails outright if no tag points at it, rather than publish a version
+# number that does not match its contents. Pushing the same tag again replaces
+# that release's files.
+#
+# One of three package workflows, alongside deb.yml and windows.yml. They publish
+# independently: each attaches its own file to the release as soon as it is
+# ready, so a build broken on one platform no longer holds up the other two.
+# The price is that a release can be incomplete with nothing saying so — check
+# that all three ran green before announcing a version.
 #
 # Their release jobs share one concurrency group. A concurrency group is
 # repository-wide rather than workflow-scoped, so naming the same group in all
@@ -15,32 +22,23 @@
 name: RPM package
 
 on:
+  # Nothing else starts these: pushing to releases is the act of publishing.
   push:
-    branches: [main]
-    tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-  pull_request:
-    paths:
-      - 'run/**'
-      - 'dune-project'
-      - 'packaging/make-rpm.sh'
-      - '.github/workflows/rpm.yml'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Package version (defaults to the nearest tag)'
-        required: false
-        type: string
+    branches: [releases]
 
 concurrency:
+  # Never cancel-in-progress here: every run publishes, and killing one
+  # mid-upload would leave the release half-populated.
   group: rpm-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-rpm:
     name: Build .rpm (x86_64)
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     env:
       SWITCH: sun-notes
     container:
@@ -67,6 +65,8 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          # Full history and tags: the version step needs to know whether a tag
+          # points at this exact commit, which a shallow clone cannot answer.
           fetch-depth: 0
 
       - name: Let git trust the checkout
@@ -74,28 +74,22 @@ jobs:
         # refuses to touch without this.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Work out the version
+      - name: Work out the version from the tag
         id: version
+        shell: bash
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            version="${{ inputs.version }}"
-          elif [ "${{ github.ref_type }}" = "tag" ]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            # An RPM version may not contain a hyphen, which separates it from
-            # the release, so the snapshot suffix uses dots and a tilde. The
-            # tilde sorts before everything, keeping snapshots below the
-            # release that follows.
-            base="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.1.0)"
-            version="${base#v}~git$(git show -s --format=%cd --date=format:%Y%m%d).$(git rev-parse --short HEAD)"
+          # The release is named after the tag on this very commit — not the
+          # nearest reachable one. A release labelled 0.1.0 but built from a
+          # commit that is not 0.1.0 cannot be taken back once people have
+          # downloaded it, so an inexact match stops the run instead.
+          if ! tag="$(git describe --exact-match --tags HEAD 2>/dev/null)"; then
+            echo "::error::No tag points at $(git rev-parse --short HEAD). Tag the commit you want to publish and push the tag (git push origin <tag>) before pushing it to releases."
+            exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Building version $version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag as version ${tag#v}"
 
-      # The switch is a named one inside ~/.opam rather than a local ./_opam,
-      # precisely so that this cache covers it: a local switch would sit in the
-      # workspace, outside the cached path, and the compiler would be rebuilt
-      # on every run.
       - name: Cache the opam root
         uses: actions/cache@v4
         with:
@@ -208,7 +202,6 @@ jobs:
   release:
     name: Attach to the release
     needs: [build-rpm, verify-rpm]
-    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -228,5 +221,11 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # On a branch push github.ref is refs/heads/releases, which is not a
+          # tag, so the action would have nothing to attach to. The tag comes
+          # from the build job — the one that has the repository checked out.
+          tag_name: ${{ needs.build-rpm.outputs.tag }}
           files: dist/*.rpm
           fail_on_unmatched_files: true
+          # Pushing the same tag to releases again replaces that release's files.
+          overwrite_files: true
