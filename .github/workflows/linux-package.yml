@@ -115,6 +115,9 @@ jobs:
       - name: Install it
         run: |
           sudo apt-get update
+          # desktop-file-utils is for the check below; it is not a dependency
+          # of the package, which is why it has to be asked for here.
+          sudo apt-get install -y desktop-file-utils
           sudo apt-get install -y ./dist/sun-notes_*.deb
 
       - name: Check what was installed
