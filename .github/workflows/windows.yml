@@ -67,7 +67,16 @@ jobs:
         # upgrade rather than install: the runner image ships an Inno Setup of
         # its own, and make-installer.ps1 needs 6.3 or later for
         # ArchitecturesAllowed=x64compatible.
-        run: choco upgrade innosetup -y --no-progress
+        run: |
+          # Chocolatey reaches its own CDN; a blip there should not fail a
+          # publish. Same reasoning for every network step in this workflow.
+          foreach ($i in 1..3) {
+            choco upgrade innosetup -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 3) { throw "choco failed after 3 attempts" }
+            Write-Host "::warning::choco attempt $i of 3 failed"
+            Start-Sleep -Seconds 30
+          }
 
       - name: Fetch the WebView2 SDK headers
         # owebview's discover.ml needs WebView2.h at build time, and owebview
@@ -81,9 +90,16 @@ jobs:
             $nugetExe = $nuget.Source
           } else {
             $nugetExe = "$env:RUNNER_TEMP\nuget.exe"
-            Invoke-WebRequest https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile $nugetExe
+            $url = 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe'
+            Invoke-WebRequest $url -OutFile $nugetExe -MaximumRetryCount 3 -RetryIntervalSec 10
           }
-          & $nugetExe install Microsoft.Web.WebView2 -OutputDirectory "$env:RUNNER_TEMP\nuget" -ExcludeVersion
+          foreach ($i in 1..3) {
+            & $nugetExe install Microsoft.Web.WebView2 -OutputDirectory "$env:RUNNER_TEMP\nuget" -ExcludeVersion
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 3) { throw "nuget failed after 3 attempts" }
+            Write-Host "::warning::nuget attempt $i of 3 failed"
+            Start-Sleep -Seconds 30
+          }
           $pkg = "$env:RUNNER_TEMP\nuget\Microsoft.Web.WebView2"
           if (-not (Test-Path "$pkg\build\native\include\WebView2.h")) {
             throw "WebView2.h is not under $pkg — the NuGet layout changed"
@@ -95,8 +111,37 @@ jobs:
           ocaml-compiler: '5'
           dune-cache: true
 
+      - name: Prefer the opam archive mirror
+        run: |
+          # menhir — and only menhir — is fetched from gitlab.inria.fr, a single
+          # institutional server rather than a CDN, and that host times out from
+          # GitHub's runners while answering instantly from elsewhere. It is the
+          # one host in this dependency tree that is not github.com or
+          # erratique.ch, and it is what has failed every run so far.
+          #
+          # opam's repository ships an `archive-mirrors: "cache"` pointing at
+          # opam.ocaml.org/cache, which holds a byte-identical copy of every
+          # archive — but that is a path relative to the repository URL, and CI
+          # uses the *git* repository (git+https://github.com/ocaml/
+          # opam-repository.git), where it does not resolve. Naming the mirror
+          # outright restores it, for every package rather than just menhir.
+          opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+          opam option --global archive-mirrors
+
       - name: Install the OCaml dependencies
-        run: opam install . --deps-only --yes
+        run: |
+          # opam fetches from a dozen different third-party hosts and only needs
+          # one to be slow — this is the step that timed out on gitlab.inria.fr
+          # fetching menhir. Retrying is worth it because the work is resumable:
+          # packages already installed stay installed, so a second attempt picks
+          # up where the first stopped rather than starting over.
+          foreach ($i in 1..3) {
+            opam install . --deps-only --yes
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 3) { throw "opam install failed after 3 attempts" }
+            Write-Host "::warning::opam attempt $i of 3 failed"
+            Start-Sleep -Seconds 30
+          }
 
       - name: Build the installer
         run: opam exec -- pwsh -File .\packaging\make-installer.ps1 -Release -Version '${{ steps.version.outputs.version }}'

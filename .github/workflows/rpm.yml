@@ -57,7 +57,23 @@ jobs:
       # fetches the tags rather than falling back to a tarball download.
       - name: Install the build and packaging tools
         run: |
-          dnf -y install --setopt=install_weak_deps=False \
+          # Every one of these reaches third-party hosts, and a timeout on any of
+          # them fails the whole publish. opam in particular fetches from a
+          # dozen different sites (erratique.ch, gitlab.inria.fr, github...) and
+          # only needs one to be slow. Retrying is worth it because the work is
+          # resumable: packages already installed stay installed, so a second
+          # attempt picks up where the first stopped rather than starting over.
+          retry() {
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::attempt $i of 3 failed: $*"
+              sleep 30
+            done
+            echo "::error::still failing after 3 attempts: $*"
+            return 1
+          }
+
+          retry dnf -y install --setopt=install_weak_deps=False \
             git tar gzip findutils diffutils which \
             opam gcc gcc-c++ make patch unzip bzip2 \
             rpm-build rpmlint desktop-file-utils libappstream-glib ImageMagick \
@@ -105,9 +121,36 @@ jobs:
           set -eux
           # Sandboxing uses bubblewrap, which needs privileges a container does
           # not have. The container is the sandbox here.
+          # Same retry helper as the tools step above, and the same reason: opam
+          # fetches from a dozen third-party hosts and only needs one to be
+          # slow. It is resumable, so a second attempt picks up where the first
+          # stopped rather than starting over.
+          retry() {
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::attempt $i of 3 failed: $*"
+              sleep 30
+            done
+            echo "::error::still failing after 3 attempts: $*"
+            return 1
+          }
+
           if [ ! -d "$HOME/.opam" ]; then
-            opam init --bare --disable-sandboxing
+            retry opam init --bare --disable-sandboxing
           fi
+          # menhir — and only menhir — is fetched from gitlab.inria.fr, a single
+          # institutional server rather than a CDN, and that host times out from
+          # GitHub's runners while answering instantly from elsewhere. It is the
+          # one host in this dependency tree that is not github.com or
+          # erratique.ch, and it is what has failed every run so far.
+          #
+          # opam's repository ships an `archive-mirrors: "cache"` pointing at
+          # opam.ocaml.org/cache, which holds a byte-identical copy of every
+          # archive — but that is a path relative to the repository URL, and CI
+          # uses the *git* repository (git+https://github.com/ocaml/
+          # opam-repository.git), where it does not resolve. Naming the mirror
+          # outright restores it, for every package rather than just menhir.
+          opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
           # A compiler opam builds for itself, not Fedora's ocaml-system.
           # Fedora splits the compiler across several RPMs, and compiler-libs
           # — Toploop, Topdirs, compiler-libs.bytecomp — is one of the pieces
@@ -117,10 +160,10 @@ jobs:
           # building the compiler removes the whole class of mismatch, and
           # costs a few minutes only when the cache is cold.
           if ! opam switch list --short | grep -qx "$SWITCH"; then
-            opam switch create "$SWITCH" ocaml-base-compiler
+            retry opam switch create "$SWITCH" ocaml-base-compiler
           fi
           eval "$(opam env --switch="$SWITCH" --set-switch)"
-          opam install . --deps-only
+          retry opam install . --deps-only
 
       - name: Build the package
         env:
@@ -157,8 +200,20 @@ jobs:
         run: |
           # desktop-file-utils and libappstream-glib are for the checks below,
           # not dependencies of the package.
-          dnf -y install findutils desktop-file-utils libappstream-glib
-          dnf -y install ./dist/sun-notes-*.rpm
+          # A mirror blip here would fail a job that gates the release, so the
+          # package-manager calls are retried like the ones in the build job.
+          retry() {
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::attempt $i of 3 failed: $*"
+              sleep 30
+            done
+            echo "::error::still failing after 3 attempts: $*"
+            return 1
+          }
+
+          retry dnf -y install findutils desktop-file-utils libappstream-glib
+          retry dnf -y install ./dist/sun-notes-*.rpm
 
       - name: Check what was installed
         run: |

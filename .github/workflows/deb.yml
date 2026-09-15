@@ -76,8 +76,20 @@ jobs:
 
       - name: Install the packaging tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # A mirror blip here would fail a job that gates the release, so the
+          # package-manager calls are retried like the ones in the build job.
+          retry() {
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::attempt $i of 3 failed: $*"
+              sleep 30
+            done
+            echo "::error::still failing after 3 attempts: $*"
+            return 1
+          }
+
+          retry sudo apt-get update
+          retry sudo apt-get install -y --no-install-recommends \
             dpkg-dev fakeroot lintian desktop-file-utils imagemagick binutils
 
       - uses: ocaml/setup-ocaml@v3
@@ -88,8 +100,38 @@ jobs:
       # opam installs the native dependencies itself: owebview declares
       # libgtk-3-dev and libwebkit2gtk-4.1-dev as depexts for Debian-family
       # systems, and opam 2.1+ acts on them.
+      - name: Prefer the opam archive mirror
+        run: |
+          # menhir — and only menhir — is fetched from gitlab.inria.fr, a single
+          # institutional server rather than a CDN, and that host times out from
+          # GitHub's runners while answering instantly from elsewhere. It is the
+          # one host in this dependency tree that is not github.com or
+          # erratique.ch, and it is what has failed every run so far.
+          #
+          # opam's repository ships an `archive-mirrors: "cache"` pointing at
+          # opam.ocaml.org/cache, which holds a byte-identical copy of every
+          # archive — but that is a path relative to the repository URL, and CI
+          # uses the *git* repository (git+https://github.com/ocaml/
+          # opam-repository.git), where it does not resolve. Naming the mirror
+          # outright restores it, for every package rather than just menhir.
+          opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+          opam option --global archive-mirrors
+
       - name: Install the OCaml dependencies
-        run: opam install . --deps-only --yes
+        run: |
+          # A mirror blip would fail the publish, so these are retried. The same
+          # helper is used again for opam below, where it matters most.
+          retry() {
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::attempt $i of 3 failed: $*"
+              sleep 30
+            done
+            echo "::error::still failing after 3 attempts: $*"
+            return 1
+          }
+
+          retry opam install . --deps-only --yes
 
       - name: Build the package
         run: opam exec -- ./packaging/make-deb.sh --release --version '${{ steps.version.outputs.version }}'
@@ -121,11 +163,27 @@ jobs:
 
       - name: Install it
         run: |
-          sudo apt-get update
+          # Every one of these reaches third-party hosts, and a timeout on any of
+          # them fails the whole publish. opam in particular fetches from a
+          # dozen different sites (erratique.ch, gitlab.inria.fr, github...) and
+          # only needs one to be slow. Retrying is worth it because the work is
+          # resumable: packages already installed stay installed, so a second
+          # attempt picks up where the first stopped rather than starting over.
+          retry() {
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::attempt $i of 3 failed: $*"
+              sleep 30
+            done
+            echo "::error::still failing after 3 attempts: $*"
+            return 1
+          }
+
+          retry sudo apt-get update
           # desktop-file-utils is for the check below; it is not a dependency
           # of the package, which is why it has to be asked for here.
-          sudo apt-get install -y desktop-file-utils
-          sudo apt-get install -y ./dist/sun-notes_*.deb
+          retry sudo apt-get install -y desktop-file-utils
+          retry sudo apt-get install -y ./dist/sun-notes_*.deb
 
       - name: Check what was installed
         run: |
