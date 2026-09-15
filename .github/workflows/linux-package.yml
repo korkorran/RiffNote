@@ -1,17 +1,22 @@
-# Builds the Debian package and, on a tag, attaches it to the release.
+# Builds the Linux packages and, on a tag, attaches them to the release.
 #
-# The build runs on ubuntu-22.04 on purpose, and the choice is not arbitrary:
-# owebview needs webkit2gtk-4.1, which first appears in Debian 12 and Ubuntu
-# 22.04, and among those 22.04 is the one with the oldest glibc (2.35). Since
-# dpkg-shlibdeps derives the libc6 floor from whatever the binary was linked
-# against, building here gives the widest set of distributions the package can
-# install on. Building on a newer runner would silently narrow it.
+# Two packages, two build hosts, one release job: the .deb has to be built on
+# Debian-family userland and the .rpm on Fedora, but both must land on the same
+# GitHub release, so they converge on a single `release` job at the end. Two
+# separate workflows would mean two gh-release calls racing for the same tag.
 #
-# If this runner image is ever retired, the replacement is
-# `runs-on: ubuntu-latest` with `container: ubuntu:22.04`, which keeps the
-# same glibc floor.
+# The .deb is built on ubuntu-22.04 on purpose, and the choice is not
+# arbitrary: owebview needs webkit2gtk-4.1, which first appears in Debian 12
+# and Ubuntu 22.04, and among those 22.04 is the one with the oldest glibc
+# (2.35). Since dpkg-shlibdeps derives the libc6 floor from whatever the binary
+# was linked against, building there gives the widest set of distributions the
+# package can install on. Building on a newer runner would silently narrow it.
+#
+# If that runner image is ever retired, the replacement is
+# `runs-on: ubuntu-latest` with `container: ubuntu:22.04`, which keeps the same
+# glibc floor.
 
-name: Linux package
+name: Linux packages
 
 on:
   push:
@@ -33,11 +38,13 @@ on:
         type: string
 
 concurrency:
-  group: linux-package-${{ github.ref }}
+  group: linux-packages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  # ------------------------------------------------------------------ Debian
+
+  build-deb:
     name: Build .deb (amd64)
     runs-on: ubuntu-22.04
 
@@ -94,9 +101,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  verify:
-    name: Install on ${{ matrix.runner }}
-    needs: build
+  verify-deb:
+    name: Install .deb on ${{ matrix.runner }}
+    needs: build-deb
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -126,6 +133,9 @@ jobs:
           # dpkg -V re-checks every file against the md5sums in the package.
           sudo dpkg -V sun-notes
           command -v sun-notes
+          # The launcher is a symlink into /usr/lib; if it resolves to nothing
+          # the app does not start at all.
+          test -x "$(readlink -f /usr/bin/sun-notes)"
           test -f /usr/lib/sun-notes/web/index.html
           test -f /usr/lib/sun-notes/web/app.js
           # No OCaml sources should have come along for the ride.
@@ -153,9 +163,162 @@ jobs:
           echo "$out"
           echo "$out" | grep -q 'native window handle'
 
+  # ------------------------------------------------------------------ Fedora
+
+  build-rpm:
+    name: Build .rpm (x86_64)
+    runs-on: ubuntu-latest
+    container:
+      # Not pinned to an older release the way the .deb build is. Fedora's
+      # support window is about thirteen months, so its users are on a recent
+      # release anyway, and the images for end-of-life releases point at
+      # mirrors that have moved to the archive — pinning one would trade a
+      # small gain in glibc reach for a build that breaks on its own schedule.
+      # Whatever is used here becomes the oldest Fedora the RPM installs on,
+      # so pin a number (fedora:43, say) if you ever need to reach further
+      # back, and pin the verify job below to the same one.
+      image: fedora:latest
+
+    steps:
+      # Before the checkout, so that actions/checkout finds a real git and
+      # fetches the tags rather than falling back to a tarball download.
+      - name: Install the build and packaging tools
+        run: |
+          dnf -y install --setopt=install_weak_deps=False \
+            git tar gzip findutils diffutils which \
+            opam ocaml gcc gcc-c++ make patch unzip bzip2 \
+            rpm-build rpmlint desktop-file-utils libappstream-glib ImageMagick \
+            gtk3-devel webkit2gtk4.1-devel pkgconf-pkg-config
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Let git trust the checkout
+        # The container runs as root over files the runner created, which git
+        # refuses to touch without this.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            # An RPM version may not contain a hyphen, which separates it from
+            # the release, so the snapshot suffix uses dots and a tilde. The
+            # tilde sorts before everything, keeping snapshots below the
+            # release that follows.
+            base="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.1.0)"
+            version="${base#v}~git$(git show -s --format=%cd --date=format:%Y%m%d).$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
+
+      - name: Cache the opam root
+        uses: actions/cache@v4
+        with:
+          path: ~/.opam
+          key: opam-fedora-${{ hashFiles('dune-project', 'sun-notes.opam') }}
+          restore-keys: opam-fedora-
+
+      - name: Set up opam and the OCaml dependencies
+        env:
+          OPAMROOTISOK: '1'   # the container is root; opam asks to be told so
+          OPAMYES: '1'
+        run: |
+          set -eux
+          # Sandboxing uses bubblewrap, which needs privileges a container does
+          # not have. The container is the sandbox here.
+          opam init --bare --disable-sandboxing
+          # ocaml-system reuses Fedora's compiler instead of building one from
+          # source, which is several minutes saved on every cold cache. If it
+          # ever turns out to be older than this project needs, swap it for an
+          # explicit compiler, e.g. `opam switch create . ocaml-base-compiler`.
+          opam switch create . ocaml-system --no-install
+          eval "$(opam env --switch="$PWD" --set-switch)"
+          opam install . --deps-only
+
+      - name: Build the package
+        run: |
+          set -eux
+          eval "$(opam env --switch="$PWD" --set-switch)"
+          ./packaging/make-rpm.sh --release --version '${{ steps.version.outputs.version }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sun-notes-rpm-x86_64
+          path: dist/*.rpm
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-rpm:
+    name: Install .rpm on Fedora
+    needs: build-rpm
+    runs-on: ubuntu-latest
+    container:
+      # Deliberately a clean image: the build container has every -devel
+      # package installed, so it would satisfy the runtime requirements by
+      # accident. This one only has what the RPM itself asks dnf for.
+      image: fedora:latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sun-notes-rpm-x86_64
+          path: dist
+
+      - name: Install it
+        run: |
+          # desktop-file-utils and libappstream-glib are for the checks below,
+          # not dependencies of the package.
+          dnf -y install findutils desktop-file-utils libappstream-glib
+          dnf -y install ./dist/sun-notes-*.rpm
+
+      - name: Check what was installed
+        run: |
+          set -euxo pipefail
+          # rpm -V re-checks every installed file against the package's digests.
+          rpm -V sun-notes
+          command -v sun-notes
+          # The launcher is a relative symlink into /usr/libexec. If it
+          # resolves to nothing, the app does not start and web_dir () would
+          # not find the page either.
+          test -x "$(readlink -f /usr/bin/sun-notes)"
+          test -f /usr/libexec/sun-notes/web/index.html
+          test -f /usr/libexec/sun-notes/web/app.js
+          # No OCaml sources should have come along for the ride.
+          ! find /usr/libexec/sun-notes/web -name '*.ml' | grep . || exit 1
+          desktop-file-validate /usr/share/applications/sun-notes.desktop
+          # GNOME Software reads this; if it is malformed the app is invisible
+          # there even though it installed correctly.
+          appstream-util validate-relax --nonet \
+            /usr/share/metainfo/io.github.korkorran.sun-notes.metainfo.xml
+          # The automatic dependency generator is the whole reason for using
+          # RPM's machinery rather than naming packages by hand, so check it
+          # actually produced the webkit requirement.
+          rpm -q --requires sun-notes | grep 'libwebkit2gtk-4\.1'
+          ldd /usr/libexec/sun-notes/sun-notes
+          ! ldd /usr/libexec/sun-notes/sun-notes | grep 'not found'
+
+      # Advisory, for the same reason as on the Debian side.
+      - name: Smoke-test the window
+        continue-on-error: true
+        run: |
+          dnf -y install xorg-x11-server-Xvfb dbus-x11
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1
+          export WEBKIT_DISABLE_DMABUF_RENDERER=1
+          out=$(xvfb-run -a dbus-run-session -- timeout 20 sun-notes 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q 'native window handle'
+
+  # ----------------------------------------------------------------- release
+
   release:
     name: Attach to the release
-    needs: [build, verify]
+    needs: [build-deb, verify-deb, build-rpm, verify-rpm]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -164,10 +327,16 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sun-notes-deb-amd64
+          pattern: sun-notes-*
+          merge-multiple: true
           path: dist
+
+      - name: List what will be uploaded
+        run: ls -l dist
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.deb
+          files: |
+            dist/*.deb
+            dist/*.rpm
           fail_on_unmatched_files: true

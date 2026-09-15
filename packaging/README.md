@@ -4,9 +4,16 @@
 |---|---|---|
 | `make-dmg.sh` | macOS, Apple Silicon | `dist/Sun-notes-<version>-arm64.dmg` |
 | `make-deb.sh` | Linux, Debian family | `dist/sun-notes_<version>_<arch>.deb` |
+| `make-rpm.sh` | Linux, Fedora family | `dist/sun-notes-<version>-1.<dist>.<arch>.rpm` |
 
-Each has to run *on* the platform it packages for; neither cross-compiles.
-The Debian package is built in CI by `.github/workflows/linux-package.yml`.
+Each has to run *on* the platform it packages for; none of them cross-compile,
+because `ocamlopt` has no `--target` and emits code for the host. Both Linux
+packages are built, installed and checked in CI by
+`.github/workflows/linux-package.yml`, which attaches them to the GitHub
+release on a tag. The macOS image is still built by hand, since it needs a Mac.
+
+The two Linux scripts share a layout and differ only where the distributions
+do — see *Nothing is bundled* below, which applies to both.
 
 # macOS — `make-dmg.sh`
 
@@ -165,3 +172,73 @@ WebKitGTK, and is the natural next step if the package needs to reach distros
 outside the Debian family. An `.rpm` is the same work as this script for a
 much smaller audience, and with dependency names that differ per distribution
 (`webkit2gtk4.1` on Fedora, `libwebkit2gtk-4_1-0` on openSUSE).
+
+
+# Linux — `make-rpm.sh`
+
+`make-rpm.sh` builds an RPM: `dist/sun-notes-<version>-1.<dist>.<arch>.rpm`.
+
+```sh
+./packaging/make-rpm.sh --release        # what you hand to someone else
+./packaging/make-rpm.sh                  # dev profile, for a quick check
+```
+
+It takes the same options as `make-deb.sh`: `--release`, `--version X.Y.Z`,
+`--outdir DIR`, `--no-build`, `--keep-tree` (which also keeps the generated
+spec file, to read).
+
+Requirements: a Fedora machine of the architecture you are packaging for, the
+project's opam switch, and `rpm-build`. `desktop-file-utils`, `libappstream-glib`
+(or `appstream`) and `rpmlint` are used to check the result if present; without
+them the script says so and carries on. ImageMagick or Pillow scales the icon.
+
+```sh
+sudo dnf install rpm-build rpmlint desktop-file-utils libappstream-glib ImageMagick
+```
+
+## What differs from the Debian package
+
+**The dependencies are not declared at all.** `make-deb.sh` has to run
+`dpkg-shlibdeps` and write a `Depends:` line; rpmbuild's dependency generator
+does the equivalent by itself, on every build, and there is no way to ask for
+it. The spec therefore names only `hicolor-icon-theme`, which is a matter of
+directory ownership that no ELF scanner can infer.
+
+That turns out to be an advantage rather than a convenience. RPM requirements
+come out as sonames — `libwebkit2gtk-4.1.so.0()(64bit)` — not package names,
+so the same RPM resolves on Fedora, on RHEL and on openSUSE, which each call
+the webkit2gtk package something different. The Debian package cannot do this:
+`Depends:` names packages, so it is tied to one family's naming.
+
+**The private directory moves.** Debian's `/usr/lib/sun-notes/` becomes
+`%{_libexecdir}/sun-notes/`, which is `/usr/libexec/sun-notes/` on Fedora. The
+script asks `rpm --eval` for the macro rather than hardcoding the path, and
+computes the `/usr/bin/sun-notes` symlink with `realpath --relative-to` for the
+same reason — the number of `..` between `_bindir` and `_libexecdir` is not
+something to assume.
+
+**There is an AppStream metainfo file.** `/usr/share/metainfo/` is how GNOME
+Software learns that the package is an application: without it the app still
+installs and runs, but Software has no description and no screenshot to show,
+and may not list it at all. That file has no equivalent in the Debian package
+because nothing on that side reads it by default.
+
+**`%global debug_package %{nil}`.** The payload is built by dune before
+rpmbuild is invoked, so there is no `%build` section and no debug symbols to
+split into a `-debuginfo` subpackage. Asking for one would only fail the build.
+
+## Publishing it
+
+`.github/workflows/linux-package.yml` builds it in a `fedora:latest` container
+on an Ubuntu runner (`build-rpm`), then installs it in a *clean* container of
+the same image to check it (`verify-rpm`) — clean because the build container
+has every `-devel` package installed and would satisfy the runtime
+requirements by accident.
+
+Two things worth knowing about that job. It uses `ocaml-system`, Fedora's own
+compiler, rather than having opam build one, which saves several minutes on a
+cold cache; if the system compiler is ever too old for this project, swap it
+for `opam switch create . ocaml-base-compiler`. And the container image decides
+the package's glibc floor, so whichever Fedora it builds in is the oldest one
+the RPM will install on — the comment above the `image:` key explains why it is
+not pinned to an older release the way the Debian build is.
