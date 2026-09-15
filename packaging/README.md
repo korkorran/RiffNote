@@ -36,13 +36,31 @@ regression is discovered when you try to publish, not before. If that becomes
 annoying, the fix is a build-only run on `main` — the same jobs minus
 `release`.
 
+Both Linux workflows build **two architectures** — `amd64`/`arm64` for the
+`.deb`, `x86_64`/`aarch64` for the `.rpm` — from a matrix whose arm64 leg runs
+on GitHub's Linux arm64 runners, free for public repositories. Nothing
+cross-compiles, since `ocamlopt` emits code for its host, so each architecture
+is a genuine build on a machine of that architecture. Both scripts already
+derived the architecture from the host (`dpkg --print-architecture`,
+`rpm --eval %{_arch}`) and needed no change; the verify jobs now also assert
+that the installed package's architecture matches the machine, which is the
+check that would have caught an x86_64 RPM being handed to an aarch64 user.
+
+Each of those workflows resolves the release version in a small job of its
+own rather than inside the matrix, because the outputs of a matrix job are
+whichever leg happened to finish last — no way to decide what a release is
+called. It also means a missing tag stops the run in seconds instead of after
+two parallel builds.
+
 The three workflows publish **independently**: each attaches its file as soon
 as it is ready, so a build broken on one platform does not hold up the other
 two. The price is that a release can be incomplete with nothing saying so, so
 check that all three ran green before announcing a version. Their release jobs
 share one `concurrency` group, which is what stops them racing to create the
-same release — a concurrency group is repository-wide, not workflow-scoped. The macOS image is the one still built by hand, since GitHub's macOS
-runners cannot notarise on their own and the image needs a Mac anyway.
+same release — a concurrency group is repository-wide, not workflow-scoped.
+
+The macOS image is the one still built by hand, since GitHub's macOS runners
+cannot notarise on their own and the image needs a Mac anyway.
 
 The Windows script is PowerShell rather than bash: it drives Windows tools
 (`ISCC.exe`, `signtool.exe`), and PowerShell is on every Windows machine while

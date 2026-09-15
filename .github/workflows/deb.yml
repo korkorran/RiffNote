@@ -44,9 +44,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-deb:
-    name: Build .deb (amd64)
-    runs-on: ubuntu-22.04
+  # Resolved once, before anything is built. Two reasons for a job of its own:
+  # a missing tag then stops the run in seconds instead of after two parallel
+  # builds, and outputs from a *matrix* job are whichever leg finished last,
+  # which is no way to decide what a release is called.
+  version:
+    name: Resolve the version
+    runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -54,13 +58,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history and tags: the version step needs to know whether a tag
+          # Full history and tags: the step below needs to know whether a tag
           # points at this exact commit, which a shallow clone cannot answer.
           fetch-depth: 0
 
       - name: Work out the version from the tag
         id: version
-        shell: bash
         run: |
           # The release is named after the tag on this very commit — not the
           # nearest reachable one. A release labelled 0.1.0 but built from a
@@ -74,10 +77,30 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "Publishing $tag as version ${tag#v}"
 
+  build-deb:
+    name: Build .deb (${{ matrix.arch }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both on 22.04 for the same reason the amd64 build was: it is the
+        # oldest Ubuntu carrying webkit2gtk-4.1, so dpkg-shlibdeps derives the
+        # lowest libc6 floor from it and the package reaches the most machines.
+        # Nothing cross-compiles — ocamlopt emits code for its host — so an
+        # arm64 package needs a genuine arm64 machine. GitHub's Linux arm64
+        # runners are free for public repositories, which this is.
+        include:
+          - { runner: ubuntu-22.04,     arch: amd64 }
+          - { runner: ubuntu-22.04-arm, arch: arm64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Install the packaging tools
         run: |
-          # A mirror blip here would fail a job that gates the release, so the
-          # package-manager calls are retried like the ones in the build job.
+          # apt mirrors are reliable but not infallible, and a blip here would
+          # fail a publish. Same retry helper throughout this workflow.
           retry() {
             for i in 1 2 3; do
               "$@" && return 0
@@ -97,16 +120,13 @@ jobs:
           ocaml-compiler: '5'
           dune-cache: true
 
-      # opam installs the native dependencies itself: owebview declares
-      # libgtk-3-dev and libwebkit2gtk-4.1-dev as depexts for Debian-family
-      # systems, and opam 2.1+ acts on them.
       - name: Prefer the opam archive mirror
         run: |
           # menhir — and only menhir — is fetched from gitlab.inria.fr, a single
           # institutional server rather than a CDN, and that host times out from
           # GitHub's runners while answering instantly from elsewhere. It is the
           # one host in this dependency tree that is not github.com or
-          # erratique.ch, and it is what has failed every run so far.
+          # erratique.ch, and it is what failed several runs.
           #
           # opam's repository ships an `archive-mirrors: "cache"` pointing at
           # opam.ocaml.org/cache, which holds a byte-identical copy of every
@@ -117,10 +137,14 @@ jobs:
           opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
           opam option --global archive-mirrors
 
+      # opam installs the native dependencies itself: owebview declares
+      # libgtk-3-dev and libwebkit2gtk-4.1-dev as depexts for Debian-family
+      # systems, and opam 2.1+ acts on them.
       - name: Install the OCaml dependencies
         run: |
-          # A mirror blip would fail the publish, so these are retried. The same
-          # helper is used again for opam below, where it matters most.
+          # opam fetches from a dozen third-party hosts and only needs one to be
+          # slow. It is resumable, so a second attempt picks up where the first
+          # stopped rather than starting over.
           retry() {
             for i in 1 2 3; do
               "$@" && return 0
@@ -134,41 +158,41 @@ jobs:
           retry opam install . --deps-only --yes
 
       - name: Build the package
-        run: opam exec -- ./packaging/make-deb.sh --release --version '${{ steps.version.outputs.version }}'
+        run: opam exec -- ./packaging/make-deb.sh --release --version '${{ needs.version.outputs.version }}'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sun-notes-deb-amd64
+          name: sun-notes-deb-${{ matrix.arch }}
           path: dist/*.deb
           if-no-files-found: error
           retention-days: 14
 
   verify-deb:
-    name: Install .deb on ${{ matrix.runner }}
+    name: Install ${{ matrix.arch }} on ${{ matrix.runner }}
     needs: build-deb
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # The two distributions the package claims to support. This is the
-        # step that actually proves the Depends are satisfiable there, rather
-        # than merely well-formed.
-        runner: [ubuntu-22.04, ubuntu-24.04]
+        # Each architecture on both distributions it claims to support. This is
+        # what actually proves the Depends are satisfiable there, rather than
+        # merely well-formed — and, since the arm64 package is built on a
+        # different machine, that it really is an arm64 package.
+        include:
+          - { runner: ubuntu-22.04,     arch: amd64 }
+          - { runner: ubuntu-24.04,     arch: amd64 }
+          - { runner: ubuntu-22.04-arm, arch: arm64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
 
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sun-notes-deb-amd64
+          name: sun-notes-deb-${{ matrix.arch }}
           path: dist
 
       - name: Install it
         run: |
-          # Every one of these reaches third-party hosts, and a timeout on any of
-          # them fails the whole publish. opam in particular fetches from a
-          # dozen different sites (erratique.ch, gitlab.inria.fr, github...) and
-          # only needs one to be slow. Retrying is worth it because the work is
-          # resumable: packages already installed stay installed, so a second
-          # attempt picks up where the first stopped rather than starting over.
+          # A mirror blip here would fail a job that gates the release.
           retry() {
             for i in 1 2 3; do
               "$@" && return 0
@@ -188,6 +212,11 @@ jobs:
       - name: Check what was installed
         run: |
           set -euxo pipefail
+          # The package must be the architecture this runner actually is —
+          # installing an amd64 .deb on an arm64 machine is the failure this
+          # matrix exists to prevent.
+          test "$(dpkg-query -W -f='${Architecture}' sun-notes)" = "${{ matrix.arch }}"
+          test "$(dpkg --print-architecture)" = "${{ matrix.arch }}"
           # dpkg -V re-checks every file against the md5sums in the package.
           sudo dpkg -V sun-notes
           command -v sun-notes
@@ -225,7 +254,7 @@ jobs:
 
   release:
     name: Attach to the release
-    needs: [build-deb, verify-deb]
+    needs: [version, build-deb, verify-deb]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -237,7 +266,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sun-notes-deb-amd64
+          # One artifact per architecture; merge-multiple drops them all into
+          # the same directory so the glob below picks up both.
+          pattern: sun-notes-deb-*
+          merge-multiple: true
           path: dist
 
       - name: List what will be uploaded
@@ -247,8 +279,8 @@ jobs:
         with:
           # On a branch push github.ref is refs/heads/releases, which is not a
           # tag, so the action would have nothing to attach to. The tag comes
-          # from the build job — the one that has the repository checked out.
-          tag_name: ${{ needs.build-deb.outputs.tag }}
+          # from the version job.
+          tag_name: ${{ needs.version.outputs.tag }}
           files: dist/*.deb
           fail_on_unmatched_files: true
           # Pushing the same tag to releases again replaces that release's files.

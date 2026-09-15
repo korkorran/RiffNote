@@ -33,12 +33,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-rpm:
-    name: Build .rpm (x86_64)
+  # Resolved once, before anything is built. Two reasons for a job of its own:
+  # a missing tag then stops the run in seconds instead of after two parallel
+  # builds, and outputs from a *matrix* job are whichever leg finished last,
+  # which is no way to decide what a release is called.
+  version:
+    name: Resolve the version
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the step below needs to know whether a tag
+          # points at this exact commit, which a shallow clone cannot answer.
+          fetch-depth: 0
+
+      - name: Work out the version from the tag
+        id: version
+        run: |
+          # The release is named after the tag on this very commit — not the
+          # nearest reachable one. A release labelled 0.1.0 but built from a
+          # commit that is not 0.1.0 cannot be taken back once people have
+          # downloaded it, so an inexact match stops the run instead.
+          if ! tag="$(git describe --exact-match --tags HEAD 2>/dev/null)"; then
+            echo "::error::No tag points at $(git rev-parse --short HEAD). Tag the commit you want to publish and push the tag (git push origin <tag>) before pushing it to releases."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag as version ${tag#v}"
+
+  build-rpm:
+    name: Build .rpm (${{ matrix.arch }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Nothing cross-compiles — ocamlopt emits code for its host — so an
+        # aarch64 package needs a genuine aarch64 machine. GitHub's Linux arm64
+        # runners are free for public repositories, which this is.
+        include:
+          - { runner: ubuntu-latest,    arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
     env:
       SWITCH: sun-notes
     container:
@@ -50,6 +90,9 @@ jobs:
       # Whatever is used here becomes the oldest Fedora the RPM installs on,
       # so pin a number (fedora:43, say) if you ever need to reach further
       # back, and pin the verify job below to the same one.
+      #
+      # The image is multi-arch, so the arm64 runner pulls the aarch64 variant
+      # and builds natively — no emulation.
       image: fedora:latest
 
     steps:
@@ -57,12 +100,8 @@ jobs:
       # fetches the tags rather than falling back to a tarball download.
       - name: Install the build and packaging tools
         run: |
-          # Every one of these reaches third-party hosts, and a timeout on any of
-          # them fails the whole publish. opam in particular fetches from a
-          # dozen different sites (erratique.ch, gitlab.inria.fr, github...) and
-          # only needs one to be slow. Retrying is worth it because the work is
-          # resumable: packages already installed stay installed, so a second
-          # attempt picks up where the first stopped rather than starting over.
+          # dnf reaches Fedora's mirrors; a blip there would fail a publish.
+          # Same retry helper throughout this workflow.
           retry() {
             for i in 1 2 3; do
               "$@" && return 0
@@ -80,38 +119,21 @@ jobs:
             gtk3-devel webkit2gtk4.1-devel pkgconf-pkg-config
 
       - uses: actions/checkout@v4
-        with:
-          # Full history and tags: the version step needs to know whether a tag
-          # points at this exact commit, which a shallow clone cannot answer.
-          fetch-depth: 0
 
       - name: Let git trust the checkout
         # The container runs as root over files the runner created, which git
         # refuses to touch without this.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Work out the version from the tag
-        id: version
-        shell: bash
-        run: |
-          # The release is named after the tag on this very commit — not the
-          # nearest reachable one. A release labelled 0.1.0 but built from a
-          # commit that is not 0.1.0 cannot be taken back once people have
-          # downloaded it, so an inexact match stops the run instead.
-          if ! tag="$(git describe --exact-match --tags HEAD 2>/dev/null)"; then
-            echo "::error::No tag points at $(git rev-parse --short HEAD). Tag the commit you want to publish and push the tag (git push origin <tag>) before pushing it to releases."
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-          echo "Publishing $tag as version ${tag#v}"
-
       - name: Cache the opam root
         uses: actions/cache@v4
         with:
           path: ~/.opam
-          key: opam-fedora-${{ hashFiles('dune-project', 'sun-notes.opam') }}
-          restore-keys: opam-fedora-
+          # The architecture belongs in the key: the switch holds a compiler
+          # and native objects, and restoring an x86_64 one onto an aarch64
+          # runner would be worse than a cold cache.
+          key: opam-fedora-${{ matrix.arch }}-${{ hashFiles('dune-project', 'sun-notes.opam') }}
+          restore-keys: opam-fedora-${{ matrix.arch }}-
 
       - name: Set up opam and the OCaml dependencies
         env:
@@ -121,8 +143,8 @@ jobs:
           set -eux
           # Sandboxing uses bubblewrap, which needs privileges a container does
           # not have. The container is the sandbox here.
-          # Same retry helper as the tools step above, and the same reason: opam
-          # fetches from a dozen third-party hosts and only needs one to be
+          #
+          # opam fetches from a dozen third-party hosts and only needs one to be
           # slow. It is resumable, so a second attempt picks up where the first
           # stopped rather than starting over.
           retry() {
@@ -142,7 +164,7 @@ jobs:
           # institutional server rather than a CDN, and that host times out from
           # GitHub's runners while answering instantly from elsewhere. It is the
           # one host in this dependency tree that is not github.com or
-          # erratique.ch, and it is what has failed every run so far.
+          # erratique.ch, and it is what failed several runs.
           #
           # opam's repository ships an `archive-mirrors: "cache"` pointing at
           # opam.ocaml.org/cache, which holds a byte-identical copy of every
@@ -171,19 +193,25 @@ jobs:
         run: |
           set -eux
           eval "$(opam env --switch="$SWITCH" --set-switch)"
-          ./packaging/make-rpm.sh --release --version '${{ steps.version.outputs.version }}'
+          ./packaging/make-rpm.sh --release --version '${{ needs.version.outputs.version }}'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sun-notes-rpm-x86_64
+          name: sun-notes-rpm-${{ matrix.arch }}
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 14
 
   verify-rpm:
-    name: Install .rpm on Fedora
+    name: Install ${{ matrix.arch }} on Fedora
     needs: build-rpm
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
     container:
       # Deliberately a clean image: the build container has every -devel
       # package installed, so it would satisfy the runtime requirements by
@@ -193,15 +221,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sun-notes-rpm-x86_64
+          name: sun-notes-rpm-${{ matrix.arch }}
           path: dist
 
       - name: Install it
         run: |
           # desktop-file-utils and libappstream-glib are for the checks below,
-          # not dependencies of the package.
-          # A mirror blip here would fail a job that gates the release, so the
-          # package-manager calls are retried like the ones in the build job.
+          # not dependencies of the package. A mirror blip here would fail a
+          # job that gates the release.
           retry() {
             for i in 1 2 3; do
               "$@" && return 0
@@ -218,6 +245,12 @@ jobs:
       - name: Check what was installed
         run: |
           set -euxo pipefail
+          # The package must be the architecture this container actually is.
+          # Installing an x86_64 RPM on an aarch64 machine fails with "does not
+          # have a compatible architecture" — which is exactly what this matrix
+          # exists to catch before a user does.
+          test "$(rpm -q --qf '%{ARCH}' sun-notes)" = "${{ matrix.arch }}"
+          test "$(uname -m)" = "${{ matrix.arch }}"
           # rpm -V re-checks every installed file against the package's digests.
           rpm -V sun-notes
           command -v sun-notes
@@ -256,7 +289,7 @@ jobs:
 
   release:
     name: Attach to the release
-    needs: [build-rpm, verify-rpm]
+    needs: [version, build-rpm, verify-rpm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -268,7 +301,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sun-notes-rpm-x86_64
+          # One artifact per architecture; merge-multiple drops them all into
+          # the same directory so the glob below picks up both.
+          pattern: sun-notes-rpm-*
+          merge-multiple: true
           path: dist
 
       - name: List what will be uploaded
@@ -278,8 +314,8 @@ jobs:
         with:
           # On a branch push github.ref is refs/heads/releases, which is not a
           # tag, so the action would have nothing to attach to. The tag comes
-          # from the build job — the one that has the repository checked out.
-          tag_name: ${{ needs.build-rpm.outputs.tag }}
+          # from the version job.
+          tag_name: ${{ needs.version.outputs.tag }}
           files: dist/*.rpm
           fail_on_unmatched_files: true
           # Pushing the same tag to releases again replaces that release's files.
