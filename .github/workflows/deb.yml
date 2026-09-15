@@ -1,0 +1,197 @@
+# Builds the Debian package and, on a tag, attaches it to the GitHub release.
+#
+# The build runs on ubuntu-22.04 on purpose, and the choice is not arbitrary:
+# owebview needs webkit2gtk-4.1, which first appears in Debian 12 and Ubuntu
+# 22.04, and among those 22.04 is the one with the oldest glibc (2.35). Since
+# dpkg-shlibdeps derives the libc6 floor from whatever the binary was linked
+# against, building there gives the widest set of distributions the package can
+# install on. Building on a newer runner would silently narrow it.
+#
+# If that runner image is ever retired, the replacement is
+# `runs-on: ubuntu-latest` with `container: ubuntu:22.04`, which keeps the same
+# glibc floor.
+#
+# One of three package workflows, alongside rpm.yml and windows.yml. They
+# publish independently: each attaches its own file to the GitHub release as
+# soon as it is ready, so a build broken on one platform no longer holds up the
+# other two. The price is that a release can be incomplete with nothing saying
+# so — check that all three ran green before announcing a version.
+#
+# Their release jobs share one concurrency group. A concurrency group is
+# repository-wide rather than workflow-scoped, so naming the same group in all
+# three serialises them: the first to arrive creates the release, the others
+# add their asset to it. Without that they would race to create it and the
+# losers would fail with a 422.
+
+name: Debian package
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    paths:
+      - 'run/**'
+      - 'dune-project'
+      - 'packaging/make-deb.sh'
+      - '.github/workflows/deb.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (defaults to the nearest tag)'
+        required: false
+        type: string
+
+concurrency:
+  group: deb-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-deb:
+    name: Build .deb (amd64)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # make-deb.sh falls back to `git describe --tags` for the version,
+          # which needs the tags to have been fetched.
+          fetch-depth: 0
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            # An untagged build still has to produce a valid Debian version.
+            # Appending the commit date and short sha keeps successive
+            # snapshots ordered, and keeps them sorting *below* the release
+            # that follows (~ sorts before everything, including the empty
+            # string).
+            base="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.1.0)"
+            version="${base#v}~git$(git show -s --format=%cd --date=format:%Y%m%d)+$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
+
+      - name: Install the packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev fakeroot lintian desktop-file-utils imagemagick binutils
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5'
+          dune-cache: true
+
+      # opam installs the native dependencies itself: owebview declares
+      # libgtk-3-dev and libwebkit2gtk-4.1-dev as depexts for Debian-family
+      # systems, and opam 2.1+ acts on them.
+      - name: Install the OCaml dependencies
+        run: opam install . --deps-only --yes
+
+      - name: Build the package
+        run: opam exec -- ./packaging/make-deb.sh --release --version '${{ steps.version.outputs.version }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sun-notes-deb-amd64
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-deb:
+    name: Install .deb on ${{ matrix.runner }}
+    needs: build-deb
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two distributions the package claims to support. This is the
+        # step that actually proves the Depends are satisfiable there, rather
+        # than merely well-formed.
+        runner: [ubuntu-22.04, ubuntu-24.04]
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sun-notes-deb-amd64
+          path: dist
+
+      - name: Install it
+        run: |
+          sudo apt-get update
+          # desktop-file-utils is for the check below; it is not a dependency
+          # of the package, which is why it has to be asked for here.
+          sudo apt-get install -y desktop-file-utils
+          sudo apt-get install -y ./dist/sun-notes_*.deb
+
+      - name: Check what was installed
+        run: |
+          set -euxo pipefail
+          # dpkg -V re-checks every file against the md5sums in the package.
+          sudo dpkg -V sun-notes
+          command -v sun-notes
+          # The launcher is a symlink into /usr/lib; if it resolves to nothing
+          # the app does not start at all.
+          test -x "$(readlink -f /usr/bin/sun-notes)"
+          test -f /usr/lib/sun-notes/web/index.html
+          test -f /usr/lib/sun-notes/web/app.js
+          # No OCaml sources should have come along for the ride.
+          ! find /usr/lib/sun-notes/web -name '*.ml' | grep . || exit 1
+          desktop-file-validate /usr/share/applications/sun-notes.desktop
+          # Nothing unresolved: this is what a missing or mis-declared
+          # dependency would look like at runtime.
+          ldd /usr/lib/sun-notes/sun-notes
+          ! ldd /usr/lib/sun-notes/sun-notes | grep 'not found'
+
+      # Advisory. Launching WebKitGTK under a virtual display is the one check
+      # here that depends on the runner's graphics stack, so a failure is not
+      # necessarily the package's fault; the install checks above are the
+      # gates. Flip continue-on-error off if it proves reliable.
+      - name: Smoke-test the window
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb dbus-x11
+          # The window handle is printed by main.ml *after* Webview.create, so
+          # seeing it means GTK and WebKit really did come up. The process then
+          # runs its event loop until the timeout kills it, hence exit 124.
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1
+          export WEBKIT_DISABLE_DMABUF_RENDERER=1
+          out=$(xvfb-run -a dbus-run-session -- timeout 20 sun-notes 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q 'native window handle'
+
+  # ----------------------------------------------------------------- release
+
+  release:
+    name: Attach to the release
+    needs: [build-deb, verify-deb]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Shared with the other two package workflows — see the note at the top.
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sun-notes-deb-amd64
+          path: dist
+
+      - name: List what will be uploaded
+        run: ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          fail_on_unmatched_files: true

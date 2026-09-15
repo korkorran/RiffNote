@@ -9,9 +9,16 @@
 
 Each has to run *on* the platform it packages for; none of them cross-compile,
 because `ocamlopt` has no `--target` and emits code for the host. The two Linux
-packages and the Windows installer are built, installed and checked in CI by
-`.github/workflows/packages.yml`, which attaches them to the GitHub release on
-a tag. The macOS image is the one still built by hand, since GitHub's macOS
+packages and the Windows installer each have their own CI workflow —
+`.github/workflows/{deb,rpm,windows}.yml` — which builds it, installs it to
+check it, and on a tag attaches it to the GitHub release.
+
+The three publish **independently**: each attaches its file as soon as it is
+ready, so a build broken on one platform does not hold up the other two. The
+price is that a release can be incomplete with nothing saying so, so check
+that all three ran green before announcing a version. Their release jobs share
+one `concurrency` group, which is what stops them racing to create the same
+release — a concurrency group is repository-wide, not workflow-scoped. The macOS image is the one still built by hand, since GitHub's macOS
 runners cannot notarise on their own and the image needs a Mac anyway.
 
 The Windows script is PowerShell rather than bash: it drives Windows tools
@@ -235,7 +242,7 @@ split into a `-debuginfo` subpackage. Asking for one would only fail the build.
 
 ## Publishing it
 
-`.github/workflows/linux-package.yml` builds it in a `fedora:latest` container
+`.github/workflows/rpm.yml` builds it in a `fedora:latest` container
 on an Ubuntu runner (`build-rpm`), then installs it in a *clean* container of
 the same image to check it (`verify-rpm`) — clean because the build container
 has every `-devel` package installed and would satisfy the runtime
@@ -369,7 +376,7 @@ more expensive to solve, since a code-signing certificate is an annual cost.
 
 ## Publishing it
 
-`.github/workflows/packages.yml` builds it on a `windows-latest` runner
+`.github/workflows/windows.yml` builds it on a `windows-latest` runner
 (`build-windows`), then installs it silently on a second, clean runner to check
 it (`verify-windows`).
 
