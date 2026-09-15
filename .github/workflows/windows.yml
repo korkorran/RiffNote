@@ -192,27 +192,36 @@ jobs:
           if ($ml) { throw "OCaml sources were shipped: $($ml.Name -join ', ')" }
           Get-ChildItem $app -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
 
-      # Advisory, for the same reason as on the two Linux sides: whether a GUI
-      # can be created at all on a runner with no interactive desktop session
-      # is not something the package controls. main.ml prints the native
-      # window handle after Webview.create, so seeing it means WebView2 came
-      # up.
-      #
-      # Note what this does NOT prove. This runner has the mingw runtime on
-      # its PATH, so the app would start here even if the installer had left
-      # libstdc++-6.dll out. Completeness of the payload is established at
-      # build time instead, by the import-table check in make-installer.ps1 —
-      # which refuses to build rather than warn, precisely because this test
-      # would go green either way.
-      - name: Smoke-test the window
-        continue-on-error: true
+      # A hard gate, and the one that 0.1.0 needed. This runner has the mingw
+      # toolchain on its PATH, so the app started here perfectly well while
+      # the published installer was missing libgcc_s_seh-1.dll and died on
+      # every user's machine. Stripping PATH back to the system directories
+      # leaves Windows able to resolve DLLs only from the install directory
+      # itself — which is exactly the situation on a clean machine.
+      - name: Check the app runs with nothing but itself on PATH
         run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$env:SystemRoot\system32;$env:SystemRoot"
           $p = Start-Process 'C:\sun-notes-test\sun-notes.exe' -PassThru -RedirectStandardOutput C:\out.txt -RedirectStandardError C:\err.txt
           Start-Sleep -Seconds 20
           if (-not $p.HasExited) { $p.Kill() }
           Get-Content C:\out.txt, C:\err.txt -ErrorAction SilentlyContinue
+          # main.ml prints the webview version before it creates any window, so
+          # reaching that line means every DLL resolved. Whether the window
+          # then opens is a separate question, checked separately below.
+          if (-not (Select-String -Path C:\out.txt -Pattern 'using webview' -Quiet)) {
+            throw "the app never got as far as printing its webview version: a DLL it needs is missing from the install"
+          }
+
+      # Advisory, for the same reason as on the two Linux sides: whether a GUI
+      # can be created at all on a runner with no interactive desktop session
+      # is not something the package controls. Reads the output captured by the
+      # step above rather than launching again.
+      - name: Smoke-test the window
+        continue-on-error: true
+        run: |
           if (-not (Select-String -Path C:\out.txt -Pattern 'native window handle' -Quiet)) {
-            throw "the window handle never appeared on stdout"
+            throw "the window handle never appeared — WebView2 or the desktop session, not the payload"
           }
 
   # ----------------------------------------------------------------- release

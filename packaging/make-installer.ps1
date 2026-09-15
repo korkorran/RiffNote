@@ -287,20 +287,8 @@ if ($null -eq $tool) {
 }
 Info "reading imports with $($tool.Path)"
 
-$imports = Get-ImportedDlls $BinSrc $tool
-$bundled = @()
-
-$foreign = $imports | Where-Object {
-  $n = $_.ToLower()
-  -not ($SystemDlls -contains $n) -and
-  -not ($n -like 'api-ms-win-*') -and -not ($n -like 'ext-ms-*')
-} | Sort-Object -Unique
-
-Info "imports $(@($imports).Count) DLLs, $(@($foreign).Count) of them not shipped by Windows"
-
 # Where a non-system DLL might live. In practice these are the mingw-w64
-# runtime libraries — libstdc++-6.dll, libgcc_s_seh-1.dll,
-# libwinpthread-1.dll — which owebview pulls in through -lstdc++ (see its
+# runtime libraries, which owebview pulls in through -lstdc++ (see its
 # lib/config/discover.ml, mingw_link_flags). They sit beside the compiler, so
 # PATH usually has them; when it does not, gcc -print-file-name does.
 #
@@ -314,21 +302,61 @@ Info "imports $(@($imports).Count) DLLs, $(@($foreign).Count) of them not shippe
 $searchDirs = @((Split-Path -Parent $BinSrc))
 $searchDirs += ($env:PATH -split ';' | Where-Object { $_ })
 
-foreach ($dll in @($foreign)) {
-  $found = $null
-  foreach ($dir in $searchDirs) {
-    $p = Join-Path $dir $dll
-    if (Test-Path $p) { $found = $p; break }
-  }
-  if (-not $found) { $found = Resolve-ViaCompiler $dll }
-  if (-not $found) {
-    Die ("the executable imports $dll, which Windows does not ship and which is neither on`n" +
-         "    PATH nor known to the C compiler. It has to be inside the installer, or the app`n" +
-         "    will not start on another machine.")
-  }
-  $bundled += $found
-  Info "  bundling $dll  ($found)"
+function Test-SystemDll([string] $Name) {
+  $n = $Name.ToLower()
+  return ($SystemDlls -contains $n) -or ($n -like 'api-ms-win-*') -or ($n -like 'ext-ms-*')
 }
+
+function Resolve-DllPath([string] $Dll) {
+  foreach ($dir in $searchDirs) {
+    $p = Join-Path $dir $Dll
+    if (Test-Path $p) { return $p }
+  }
+  return (Resolve-ViaCompiler $Dll)
+}
+
+# Walk the whole import closure, not just the executable's own table.
+#
+# This is the bug that shipped in 0.1.0. A DLL we bundle has imports of its
+# own: libstdc++-6.dll pulls in libgcc_s_seh-1.dll and libwinpthread-1.dll,
+# and neither of those appears anywhere in main.exe's import table. Scanning
+# one level deep found libstdc++-6.dll, shipped it alone, and the installed
+# app died on launch with "the code execution cannot proceed because
+# libgcc_s_seh-1.dll was not found" — on any machine without a toolchain,
+# which is to say on every machine but the one that built it.
+#
+# So: queue the executable, scan it, and queue every non-system DLL found so
+# that whatever *it* imports is scanned too, until nothing new turns up.
+$bundled = @{}
+$seen = @{}
+$queue = New-Object System.Collections.Queue
+$queue.Enqueue(@{ Path = $BinSrc; Name = (Split-Path -Leaf $BinSrc) })
+$scanned = 0
+
+while ($queue.Count -gt 0) {
+  $item = $queue.Dequeue()
+  $scanned++
+  foreach ($dll in @(Get-ImportedDlls $item.Path $tool)) {
+    $n = $dll.ToLower()
+    if ($seen.ContainsKey($n)) { continue }
+    $seen[$n] = $true
+    if (Test-SystemDll $dll) { continue }
+
+    $found = Resolve-DllPath $dll
+    if (-not $found) {
+      Die ("$($item.Name) imports $dll, which Windows does not ship and which is neither on`n" +
+           "    PATH nor known to the C compiler. It has to be inside the installer, or the app`n" +
+           "    will not start on another machine.")
+    }
+    $bundled[$n] = $found
+    Info "  bundling $dll  (needed by $($item.Name))"
+    # Scan what this one imports in turn.
+    $queue.Enqueue(@{ Path = $found; Name = $dll })
+  }
+}
+
+Info "scanned $scanned binaries, bundling $($bundled.Count) DLLs Windows does not ship"
+$bundled = @($bundled.Values)
 
 # ------------------------------------------------------ step 4: build the icon
 

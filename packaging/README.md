@@ -328,6 +328,16 @@ filters out the DLLs Windows provides, hunts for the rest on `PATH`, copies
 them into the payload, and refuses to build if one cannot be found. Where the
 `.deb` *declares* and the `.rpm` *infers*, this one *carries*.
 
+It walks the **whole import closure**, not just the executable's own table,
+and that distinction is not academic: it is what 0.1.0 got wrong. `main.exe`
+imports `libstdc++-6.dll`, which in turn imports `libgcc_s_seh-1.dll` and
+`libwinpthread-1.dll` — neither of which appears anywhere in `main.exe`'s
+imports. Scanning one level deep bundled `libstdc++-6.dll` alone, and the
+installed app died on launch with *"the code execution cannot proceed because
+libgcc_s_seh-1.dll was not found"* on every machine without a toolchain. The
+script now queues each DLL it bundles and scans that one too, until nothing
+new turns up.
+
 In practice what it would carry is the mingw-w64 runtime. owebview's Windows
 target is mingw only — its `lib/config/discover.ml` matches on `"mingw64"` and
 has no MSVC branch — and its link flags include `-lstdc++`, which brings in
@@ -415,7 +425,14 @@ Inno Setup is `choco upgrade`d rather than assumed: the runner image carries a
 version of its own, and it may predate the 6.3 this script needs.
 
 The install check pins `/DIR=C:\sun-notes-test` so it does not have to guess
-where `PrivilegesRequired=lowest` put the files, and the launch test is
-advisory — a runner has no interactive desktop session, so a GUI failing to
-come up there says little about the package. It is still the only check that
-proves every bundled DLL resolves and that WebView2 started.
+where `PrivilegesRequired=lowest` put the files.
+
+Then it launches the app **with `PATH` stripped to the system directories**.
+That is the check that would have caught the 0.1.0 bug and did not exist at
+the time: a runner has the mingw toolchain on its `PATH`, so the app started
+there quite happily while the installer it had just built was missing a DLL.
+With `PATH` reduced, Windows can only resolve DLLs from the install directory,
+exactly as on a user's machine. The assertion is on the webview version line,
+which `main.ml` prints *before* creating any window — reaching it proves every
+DLL resolved. Whether the window then opens is checked separately and
+advisorily, since that depends on the runner having a desktop session.
