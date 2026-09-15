@@ -13,7 +13,13 @@ Implemented with the libraries Owebview for the desktop-GUI bindings and Vdom fo
 
 Click on the "Releases" link of the Github page of the repository to access the installers.
 
-For now only MacOS with arm64 architecture (M-series) is provided.
+| Platform | File | Notes |
+|---|---|---|
+| macOS, Apple Silicon | `.dmg` | macOS 11 or later. The app is signed ad-hoc but not notarised: on first launch, right-click it in Applications and choose *Open*. |
+| Debian, Ubuntu and derivatives (x86-64) | `.deb` | Debian 12 / Ubuntu 22.04 or later, which is where webkit2gtk-4.1 arrives. Install with `sudo apt install ./sun-notes_<version>_amd64.deb`. |
+
+Intel Macs, Windows and other Linux distributions are not built yet; see
+[packaging/](./packaging) to build from source.
 
 ## Contribute
 
