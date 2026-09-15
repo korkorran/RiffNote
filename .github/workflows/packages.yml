@@ -1,9 +1,12 @@
-# Builds the Linux packages and, on a tag, attaches them to the release.
+# Builds every downloadable package and, on a tag, attaches them to the release.
 #
-# Two packages, two build hosts, one release job: the .deb has to be built on
-# Debian-family userland and the .rpm on Fedora, but both must land on the same
-# GitHub release, so they converge on a single `release` job at the end. Two
-# separate workflows would mean two gh-release calls racing for the same tag.
+# Three packages, three build hosts, one release job: the .deb has to be built
+# on Debian-family userland, the .rpm on Fedora and the Windows installer on
+# Windows, but all of them must land on the same GitHub release, so they
+# converge on a single `release` job at the end. Separate workflows would mean
+# several gh-release calls racing for the same tag.
+#
+# The macOS image is the one that is still built by hand — see packaging/.
 #
 # The .deb is built on ubuntu-22.04 on purpose, and the choice is not
 # arbitrary: owebview needs webkit2gtk-4.1, which first appears in Debian 12
@@ -16,7 +19,7 @@
 # `runs-on: ubuntu-latest` with `container: ubuntu:22.04`, which keeps the same
 # glibc floor.
 
-name: Linux packages
+name: Packages
 
 on:
   push:
@@ -29,7 +32,7 @@ on:
       - 'packaging/**'
       - 'run/**'
       - 'dune-project'
-      - '.github/workflows/linux-package.yml'
+      - '.github/workflows/packages.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -38,7 +41,7 @@ on:
         type: string
 
 concurrency:
-  group: linux-packages-${{ github.ref }}
+  group: packages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -168,6 +171,8 @@ jobs:
   build-rpm:
     name: Build .rpm (x86_64)
     runs-on: ubuntu-latest
+    env:
+      SWITCH: sun-notes
     container:
       # Not pinned to an older release the way the .deb build is. Fedora's
       # support window is about thirteen months, so its users are on a recent
@@ -186,7 +191,7 @@ jobs:
         run: |
           dnf -y install --setopt=install_weak_deps=False \
             git tar gzip findutils diffutils which \
-            opam ocaml gcc gcc-c++ make patch unzip bzip2 \
+            opam gcc gcc-c++ make patch unzip bzip2 \
             rpm-build rpmlint desktop-file-utils libappstream-glib ImageMagick \
             gtk3-devel webkit2gtk4.1-devel pkgconf-pkg-config
 
@@ -217,6 +222,10 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Building version $version"
 
+      # The switch is a named one inside ~/.opam rather than a local ./_opam,
+      # precisely so that this cache covers it: a local switch would sit in the
+      # workspace, outside the cached path, and the compiler would be rebuilt
+      # on every run.
       - name: Cache the opam root
         uses: actions/cache@v4
         with:
@@ -232,19 +241,29 @@ jobs:
           set -eux
           # Sandboxing uses bubblewrap, which needs privileges a container does
           # not have. The container is the sandbox here.
-          opam init --bare --disable-sandboxing
-          # ocaml-system reuses Fedora's compiler instead of building one from
-          # source, which is several minutes saved on every cold cache. If it
-          # ever turns out to be older than this project needs, swap it for an
-          # explicit compiler, e.g. `opam switch create . ocaml-base-compiler`.
-          opam switch create . ocaml-system --no-install
-          eval "$(opam env --switch="$PWD" --set-switch)"
+          if [ ! -d "$HOME/.opam" ]; then
+            opam init --bare --disable-sandboxing
+          fi
+          # A compiler opam builds for itself, not Fedora's ocaml-system.
+          # Fedora splits the compiler across several RPMs, and compiler-libs
+          # — Toploop, Topdirs, compiler-libs.bytecomp — is one of the pieces
+          # left out: against ocaml-system, ocamlfind, stdlib-shims and
+          # ocaml-compiler-libs all fail to build for want of exactly those
+          # modules. Installing the missing RPM would fix this instance;
+          # building the compiler removes the whole class of mismatch, and
+          # costs a few minutes only when the cache is cold.
+          if ! opam switch list --short | grep -qx "$SWITCH"; then
+            opam switch create "$SWITCH" ocaml-base-compiler
+          fi
+          eval "$(opam env --switch="$SWITCH" --set-switch)"
           opam install . --deps-only
 
       - name: Build the package
+        env:
+          OPAMROOTISOK: '1'
         run: |
           set -eux
-          eval "$(opam env --switch="$PWD" --set-switch)"
+          eval "$(opam env --switch="$SWITCH" --set-switch)"
           ./packaging/make-rpm.sh --release --version '${{ steps.version.outputs.version }}'
 
       - uses: actions/upload-artifact@v4
@@ -314,11 +333,144 @@ jobs:
           echo "$out"
           echo "$out" | grep -q 'native window handle'
 
+  # ----------------------------------------------------------------- Windows
+
+  build-windows:
+    name: Build installer (x64)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Work out the version
+        shell: bash
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            base="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.1.0)"
+            version="${base#v}~git$(git show -s --format=%cd --date=format:%Y%m%d).$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
+
+      - name: Install Inno Setup
+        # upgrade rather than install: the runner image ships an Inno Setup of
+        # its own, and make-installer.ps1 needs 6.3 or later for
+        # ArchitecturesAllowed=x64compatible.
+        run: choco upgrade innosetup -y --no-progress
+
+      - name: Fetch the WebView2 SDK headers
+        # owebview's discover.ml needs WebView2.h at build time, and owebview
+        # is a dependency — so this has to happen before `opam install`, not
+        # before the packaging script. Setting MICROSOFT_WEB_WEBVIEW2 is more
+        # predictable than the NuGet-cache search discover.ml falls back to:
+        # `nuget install` unpacks into the working directory, not the cache.
+        run: |
+          $nuget = Get-Command nuget -ErrorAction SilentlyContinue
+          if ($nuget) {
+            $nugetExe = $nuget.Source
+          } else {
+            $nugetExe = "$env:RUNNER_TEMP\nuget.exe"
+            Invoke-WebRequest https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile $nugetExe
+          }
+          & $nugetExe install Microsoft.Web.WebView2 -OutputDirectory "$env:RUNNER_TEMP\nuget" -ExcludeVersion
+          $pkg = "$env:RUNNER_TEMP\nuget\Microsoft.Web.WebView2"
+          if (-not (Test-Path "$pkg\build\native\include\WebView2.h")) {
+            throw "WebView2.h is not under $pkg — the NuGet layout changed"
+          }
+          "MICROSOFT_WEB_WEBVIEW2=$pkg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5'
+          dune-cache: true
+
+      - name: Install the OCaml dependencies
+        run: opam install . --deps-only --yes
+
+      - name: Build the installer
+        run: opam exec -- pwsh -File .\packaging\make-installer.ps1 -Release -Version '${{ steps.version.outputs.version }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sun-notes-windows-x64
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-windows:
+    name: Install on windows-latest
+    needs: build-windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sun-notes-windows-x64
+          path: dist
+
+      - name: Install it silently
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem dist\*.exe | Select-Object -First 1).FullName
+          # /DIR pins the location: with PrivilegesRequired=lowest the default
+          # is under the user's profile, and the checks below should not have
+          # to guess which.
+          $innoArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
+                        '/DIR=C:\sun-notes-test', '/LOG=C:\install.log')
+          $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList $innoArgs
+          if ($p.ExitCode -ne 0) {
+            Get-Content C:\install.log -Tail 60
+            throw "the installer exited with $($p.ExitCode)"
+          }
+
+      - name: Check what was installed
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = 'C:\sun-notes-test'
+          foreach ($f in @("$app\sun-notes.exe", "$app\web\index.html",
+                           "$app\web\app.js", "$app\unins000.exe")) {
+            if (-not (Test-Path $f)) { throw "missing from the install: $f" }
+          }
+          # No OCaml sources should have come along for the ride.
+          $ml = Get-ChildItem "$app\web" -Include *.ml,*.mli -Recurse -ErrorAction SilentlyContinue
+          if ($ml) { throw "OCaml sources were shipped: $($ml.Name -join ', ')" }
+          Get-ChildItem $app -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
+
+      # Advisory, for the same reason as on the two Linux sides: whether a GUI
+      # can be created at all on a runner with no interactive desktop session
+      # is not something the package controls. main.ml prints the native
+      # window handle after Webview.create, so seeing it means WebView2 came
+      # up.
+      #
+      # Note what this does NOT prove. This runner has the mingw runtime on
+      # its PATH, so the app would start here even if the installer had left
+      # libstdc++-6.dll out. Completeness of the payload is established at
+      # build time instead, by the import-table check in make-installer.ps1 —
+      # which refuses to build rather than warn, precisely because this test
+      # would go green either way.
+      - name: Smoke-test the window
+        continue-on-error: true
+        run: |
+          $p = Start-Process 'C:\sun-notes-test\sun-notes.exe' -PassThru -RedirectStandardOutput C:\out.txt -RedirectStandardError C:\err.txt
+          Start-Sleep -Seconds 20
+          if (-not $p.HasExited) { $p.Kill() }
+          Get-Content C:\out.txt, C:\err.txt -ErrorAction SilentlyContinue
+          if (-not (Select-String -Path C:\out.txt -Pattern 'native window handle' -Quiet)) {
+            throw "the window handle never appeared on stdout"
+          }
+
   # ----------------------------------------------------------------- release
 
   release:
     name: Attach to the release
-    needs: [build-deb, verify-deb, build-rpm, verify-rpm]
+    needs: [build-deb, verify-deb, build-rpm, verify-rpm, build-windows, verify-windows]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -339,4 +491,5 @@ jobs:
           files: |
             dist/*.deb
             dist/*.rpm
+            dist/*.exe
           fail_on_unmatched_files: true

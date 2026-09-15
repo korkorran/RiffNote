@@ -5,12 +5,18 @@
 | `make-dmg.sh` | macOS, Apple Silicon | `dist/Sun-notes-<version>-arm64.dmg` |
 | `make-deb.sh` | Linux, Debian family | `dist/sun-notes_<version>_<arch>.deb` |
 | `make-rpm.sh` | Linux, Fedora family | `dist/sun-notes-<version>-1.<dist>.<arch>.rpm` |
+| `make-installer.ps1` | Windows | `dist/Sun-notes-<version>-<arch>-setup.exe` |
 
 Each has to run *on* the platform it packages for; none of them cross-compile,
-because `ocamlopt` has no `--target` and emits code for the host. Both Linux
-packages are built, installed and checked in CI by
-`.github/workflows/linux-package.yml`, which attaches them to the GitHub
-release on a tag. The macOS image is still built by hand, since it needs a Mac.
+because `ocamlopt` has no `--target` and emits code for the host. The two Linux
+packages and the Windows installer are built, installed and checked in CI by
+`.github/workflows/packages.yml`, which attaches them to the GitHub release on
+a tag. The macOS image is the one still built by hand, since GitHub's macOS
+runners cannot notarise on their own and the image needs a Mac anyway.
+
+The Windows script is PowerShell rather than bash: it drives Windows tools
+(`ISCC.exe`, `signtool.exe`), and PowerShell is on every Windows machine while
+bash is not.
 
 The two Linux scripts share a layout and differ only where the distributions
 do — see *Nothing is bundled* below, which applies to both.
@@ -235,10 +241,151 @@ the same image to check it (`verify-rpm`) — clean because the build container
 has every `-devel` package installed and would satisfy the runtime
 requirements by accident.
 
-Two things worth knowing about that job. It uses `ocaml-system`, Fedora's own
-compiler, rather than having opam build one, which saves several minutes on a
-cold cache; if the system compiler is ever too old for this project, swap it
-for `opam switch create . ocaml-base-compiler`. And the container image decides
-the package's glibc floor, so whichever Fedora it builds in is the oldest one
-the RPM will install on — the comment above the `image:` key explains why it is
-not pinned to an older release the way the Debian build is.
+Two things worth knowing about that job. It has opam **build its own
+compiler** rather than reuse Fedora's through `ocaml-system`. That is not the
+cheaper option — it costs a few minutes whenever the cache is cold — but
+Fedora splits the OCaml compiler across several RPMs, and `compiler-libs`
+(`Toploop`, `Topdirs`, `compiler-libs.bytecomp`) is one of the pieces that is
+not pulled in by the `ocaml` package: against `ocaml-system`, `ocamlfind`,
+`stdlib-shims` and `ocaml-compiler-libs` all fail to build for want of exactly
+those modules. Installing the missing RPM fixes that one instance; building the
+compiler removes the class of mismatch. The switch is a named one inside
+`~/.opam` rather than a local `./_opam`, so that the cache step actually covers
+it — a local switch sits in the workspace, outside the cached path, and would
+be rebuilt every run.
+
+And the container image decides the package's glibc floor, so whichever Fedora
+it builds in is the oldest one the RPM will install on — the comment above the
+`image:` key explains why it is not pinned to an older release the way the
+Debian build is.
+
+
+# Windows — `make-installer.ps1`
+
+`make-installer.ps1` builds an Inno Setup installer:
+`dist\Sun-notes-<version>-<arch>-setup.exe`.
+
+```powershell
+.\packaging\make-installer.ps1 -Release      # what you hand to someone else
+.\packaging\make-installer.ps1               # dev profile, for a quick check
+```
+
+| Option | |
+|---|---|
+| `-Release` | Build with dune's `release` profile. Without it, the `dev` profile is packaged as is. |
+| `-Version X.Y.Z` | Installer version. Defaults to the nearest git tag, then to `0.1.0`. |
+| `-OutDir DIR` | Where to write the installer. Defaults to `dist\`. |
+| `-NoBuild` | Package whatever is already in `_build\`. |
+| `-KeepTree` | Also leave the staged payload and the generated `.iss` next to the installer. |
+| `-SignToolPath PATH`, `-SignArgs "..."` | Sign the finished installer with your own certificate. |
+
+Requirements: Windows, the project's opam switch, and **Inno Setup 6.3 or
+later** (`winget install JRSoftware.InnoSetup`). ImageMagick or Pillow is
+needed to turn `logo.png` into an `.ico` — that one is not optional, since
+Inno wants an icon. `rcedit` and `objdump`/`dumpbin` are used if present; the
+script says what it loses without them.
+
+Remember that owebview needs the WebView2 SDK headers at *build* time, through
+NuGet — `nuget install Microsoft.Web.WebView2` before `opam install .`, as the
+main README says.
+
+## The three things Windows changes
+
+**Nothing resolves dependencies at install time.** There is no apt or dnf, so
+any DLL the executable imports and Windows does not ship has to travel inside
+the installer. The script reads the import table with `objdump` or `dumpbin`,
+filters out the DLLs Windows provides, hunts for the rest on `PATH`, copies
+them into the payload, and refuses to build if one cannot be found. Where the
+`.deb` *declares* and the `.rpm` *infers*, this one *carries*.
+
+In practice what it would carry is the mingw-w64 runtime. owebview's Windows
+target is mingw only — its `lib/config/discover.ml` matches on `"mingw64"` and
+has no MSVC branch — and its link flags include `-lstdc++`, which brings in
+`libstdc++-6.dll` and, with it, `libgcc_s_seh-1.dll` and `libwinpthread-1.dll`.
+
+owebview's `mingw_link_flags` now carries `-static-libgcc
+-static-libstdc++`, which folds the GCC runtime into the executable — but
+**that is not in effect here yet**, and will not be until it is released.
+`opam install . --deps-only` resolves `owebview` from the opam repository, and
+the published 0.1.0 predates the change; a local edit to a sibling checkout
+changes nothing for this project or for CI. So expect the three DLLs to be
+bundled until owebview is republished and this project's dependency moves with
+it.
+
+There is a second caveat for when it does land, written out in full in the
+comment beside those flags: `-static-libstdc++` is implemented by the *g++*
+driver, which swaps out the `-lstdc++` it adds itself, whereas OCaml links
+through the C driver against an explicit `-lstdc++` — so it may be a no-op,
+and only a Windows build settles it. `-static-libgcc` is handled by the common
+driver and does take effect.
+
+Either way this script is where you find out: the "bundling" lines of step 3
+name every DLL that goes in.
+
+`WebView2Loader.dll` is *not* one of them, which is worth stating because it
+is the natural assumption. owebview's vendored `webview.h` defaults to
+`WEBVIEW_MSWEBVIEW2_BUILTIN_IMPL=1`: it finds the runtime through the registry
+itself, and the `LoadLibraryW` of `WebView2Loader.dll` is guarded by an
+`is_loaded()` check with the built-in implementation as the fallback. Loaded
+by name at runtime, it never appears in the import table, and it is never
+required.
+
+**WebView2 may be missing.** It ships with Windows 11 and reaches most
+Windows 10 machines through Edge, but "most" is not "all", and when it is
+absent the app starts and shows an empty window — no error, nothing to
+diagnose. The installer therefore looks for the runtime and, if it is not
+there, downloads Microsoft's Evergreen bootstrapper and runs it before the app.
+A failed download is not fatal: it explains the situation and carries on,
+because refusing to install helps nobody.
+
+The registry checks deliberately mirror the ones the app will make at startup:
+`webview.h`'s `find_installed_client` reads the `EBWebView` value under
+`SOFTWARE\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`
+in the 32-bit registry view, per-machine first and then per-user. Checking the
+same places is what stops the installer from ever reporting success where the
+app would then show an empty window. Microsoft's documented
+`Clients\<guid>\pv` value is consulted too, as a second opinion.
+
+**The executable has no icon.** `main.ml` never calls `set_app_icon`, and on
+Windows that call only sets the *window* icon anyway — what Explorer and the
+Start menu show comes from an ICO resource compiled into the `.exe`. The script
+embeds one with `rcedit` when it is available, and installs a `.ico` that the
+shortcuts point at regardless, so the shortcuts look right either way. Without
+`rcedit` the file itself keeps the generic icon in Explorer.
+
+## Install scope and signing
+
+The installer asks for `PrivilegesRequired=lowest`, so a normal install needs
+no UAC prompt and lands under the user's own profile; the wizard still offers
+to elevate for an all-users install. `ArchitecturesAllowed=x64compatible`
+means the x64 build also installs on Windows on ARM, which runs it under
+emulation.
+
+It is **not signed** unless you pass `-SignToolPath`. An unsigned installer
+makes SmartScreen tell the user the publisher is unknown, and that warning
+persists until the certificate accumulates reputation — the Windows equivalent
+of the notarisation problem described in the macOS section above, and rather
+more expensive to solve, since a code-signing certificate is an annual cost.
+
+## Publishing it
+
+`.github/workflows/packages.yml` builds it on a `windows-latest` runner
+(`build-windows`), then installs it silently on a second, clean runner to check
+it (`verify-windows`).
+
+Two ordering details in that job are not obvious. The WebView2 SDK headers have
+to be fetched **before `opam install`**, not before the packaging script:
+owebview is a dependency, so its `discover.ml` runs — and needs `WebView2.h` —
+during the dependency install. And the job sets `MICROSOFT_WEB_WEBVIEW2`
+explicitly rather than relying on `discover.ml`'s NuGet-cache search, because
+`nuget install` unpacks into the working directory rather than into
+`%USERPROFILE%\.nuget\packages`.
+
+Inno Setup is `choco upgrade`d rather than assumed: the runner image carries a
+version of its own, and it may predate the 6.3 this script needs.
+
+The install check pins `/DIR=C:\sun-notes-test` so it does not have to guess
+where `PrivilegesRequired=lowest` put the files, and the launch test is
+advisory — a runner has no interactive desktop session, so a GUI failing to
+come up there says little about the package. It is still the only check that
+proves every bundled DLL resolves and that WebView2 started.
