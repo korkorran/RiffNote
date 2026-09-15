@@ -3,7 +3,7 @@ let () =
   let v = Webview.version () in
   Printf.printf "using webview %s\n%!" v.Webview.version_number;
 
-  let w = Webview.create ~debug:true () in
+  let w = Webview.create ~debug:false () in
   Webview.set_title w "Sun notes";
   (* Two columns side by side need more room than the 480x320 the example
      started with, and the output pane is now meant to hold a whole file. *)
